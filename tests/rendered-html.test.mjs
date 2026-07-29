@@ -52,4 +52,9 @@ test("keeps the requested schedule order and KPI controls", async () => {
   assert.match(source, /Show completed entries/);
   assert.match(source, /TRANSFER SHIPPING/);
   assert.match(source, /AVG TRUCKING COST · YTD/);
+  assert.match(source, /never shipment Invoice Amount/);
+  assert.match(source, /!record\.isTransfer/);
+  assert.match(source, /parseFreightCost/);
+  assert.match(source, /amount <= 250_000/);
+  assert.doesNotMatch(source, /\.\.\.truckingCostRecords\(currentOutbound/);
 });

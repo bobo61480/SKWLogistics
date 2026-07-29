@@ -181,6 +181,17 @@ function parseMoney(value: string) {
   return Number.isFinite(amount) ? amount : 0;
 }
 
+function parseFreightCost(value: string) {
+  const text = clean(value).toUpperCase().replace(/\bUSD\b/g, "").trim();
+  // Freight Invoice cells sometimes contain carrier invoice identifiers (for
+  // example 5648481B). Only currency-like values qualify as costs.
+  if (!text || /[A-Z]/.test(text) || !/^[\s$,\d().-]+$/.test(text)) return 0;
+  const amount = parseMoney(text);
+  // This guard rejects long all-numeric invoice IDs while retaining any
+  // plausible per-shipment freight charge in these ledgers.
+  return amount > 0 && amount <= 250_000 ? amount : 0;
+}
+
 function money(value: number) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -198,13 +209,21 @@ function loadType(value: string) {
 
 function distanceBand(destination: string) {
   const text = clean(destination).toUpperCase();
+  if (!text) return "unknown" as const;
   const localCity =
     /\b(BUENA PARK|ANAHEIM|CERRITOS|LA MIRADA|FULLERTON|LA HABRA|BREA|ORANGE|SANTA ANA|IRVINE|COSTA MESA|HUNTINGTON BEACH|LONG BEACH|CARSON|TORRANCE|COMPTON|DOWNEY|NORWALK|WHITTIER|POMONA|ONTARIO|BLOOMINGTON|LOS ANGELES|GLENDALE|PASADENA)\b/;
   const localZip =
     /\b(90[0-8]\d{2}|91[0-2]\d{2}|917\d{2}|918\d{2}|92316|926\d{2}|927\d{2}|928\d{2})\b/;
   if (localCity.test(text) || localZip.test(text)) return "local";
   if (/\bCA\b|CALIFORNIA/.test(text)) return "california";
-  return "out-of-state";
+  // Do not turn an incomplete address, customer name, or other free text into
+  // an out-of-state shipment. A state code/name or a transfer location is
+  // required for that classification.
+  if (
+    /\b(AL|AK|AZ|AR|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b/.test(text) ||
+    /\b(NEW JERSEY|NEW YORK|WASHINGTON|TEXAS|ILLINOIS|FLORIDA|GEORGIA|PENNSYLVANIA|MASSACHUSETTS|ARIZONA|NEVADA|OREGON|COLORADO)\b/.test(text)
+  ) return "out-of-state";
+  return "unknown" as const;
 }
 
 function costRecord(
@@ -218,8 +237,8 @@ function costRecord(
 ) {
   const date = parseDate(dateText);
   if (!date) return null;
-  const invoiced = parseMoney(invoiceValue);
-  const rate = parseMoney(rateValue);
+  const invoiced = parseFreightCost(invoiceValue);
+  const rate = parseFreightCost(rateValue);
   return {
     date,
     cost: invoiced || rate,
@@ -260,22 +279,6 @@ function transferCostRecords(table: any) {
   });
 }
 
-function dedupeCosts(records: CostRecord[]) {
-  const seen = new Set<string>();
-  return records.filter((record) => {
-    const key = [
-      dayKey(record.date),
-      record.carrier.toUpperCase(),
-      record.destination.toUpperCase(),
-      record.cost.toFixed(2),
-      record.isTransfer ? "TRANSFER" : "FREIGHT",
-    ].join("|");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
 function salesAmounts(table: any, source: "sales" | "national") {
   return (table.rows ?? []).flatMap((row: any) => {
     const dateText =
@@ -291,7 +294,6 @@ function salesAmounts(table: any, source: "sales" | "national") {
 function buildKpis(
   warehouseTrucking: any,
   transfers: any,
-  currentOutbound: any,
   sales: any,
   national: any,
 ): KpiSnapshot {
@@ -299,11 +301,13 @@ function buildKpis(
   const isYtd = (date: Date) => date.getFullYear() === 2026 && date <= today;
   const isMtd = (date: Date) =>
     isYtd(date) && date.getMonth() === today.getMonth();
-  const costs = dedupeCosts([
+  // WH Trucking Request is the complete outbound cost ledger, including
+  // hidden/completed rows. Do not add the derived Outbound Schedule again:
+  // it mirrors this ledger and would double-count the same shipment.
+  const costs = [
     ...truckingCostRecords(warehouseTrucking),
-    ...truckingCostRecords(currentOutbound, null),
     ...transferCostRecords(transfers),
-  ]);
+  ];
   const ytdCosts = costs.filter((record) => isYtd(record.date));
   const mtdCosts = ytdCosts.filter((record) => isMtd(record.date));
   const transferYtd = ytdCosts.filter((record) => record.isTransfer);
@@ -324,9 +328,14 @@ function buildKpis(
   const ltl = classified.filter((record) => record.loadType === "LTL").length;
   const ftl = classified.filter((record) => record.loadType === "FTL").length;
   const splitTotal = ltl + ftl;
-  const average = (band: ReturnType<typeof distanceBand>) => {
+  const average = (band: "local" | "california" | "out-of-state") => {
+    // Trucking averages describe outbound customer moves only. Transfers and
+    // records without a classifiable destination are intentionally excluded.
     const matching = ytdCosts.filter(
-      (record) => record.cost > 0 && distanceBand(record.destination) === band,
+      (record) =>
+        !record.isTransfer &&
+        record.cost > 0 &&
+        distanceBand(record.destination) === band,
     );
     return matching.length
       ? matching.reduce((sum, record) => sum + record.cost, 0) / matching.length
@@ -1299,7 +1308,7 @@ export default function Home() {
         ...nationalOutboundItems(nationalOutbound),
         ...salesOutboundItems(salesOutbound),
       ]);
-      setKpis(buildKpis(warehouseTrucking, transfers, outbound, salesOutbound, nationalOutbound));
+      setKpis(buildKpis(warehouseTrucking, transfers, salesOutbound, nationalOutbound));
       setUpdatedAt(new Date());
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "The live schedule could not be loaded.");
@@ -1537,9 +1546,11 @@ export default function Home() {
           </article>
         </div>
         <p className="kpi-method">
-          Shipping costs use the Invoiced/Invoice amount when present, then Rate. Sales use 2026
-          invoice and PO amounts. FTL is explicit full-truckload or 10+ pallets; local is measured
-          from Buena Park by destination city/ZIP.
+          All rows, including hidden/completed entries. Shipping costs use freight Invoice first,
+          then Rate when Invoice is blank—never shipment Invoice Amount. Sales use outbound
+          Shipment Value / Invoice Value / Invoice Total / Invoice Amount. MTD is the current
+          month; YTD begins Jan 1, 2026. Trucking averages exclude transfers and unclassified
+          destinations; local is within 50 miles of Buena Park.
         </p>
       </section>
 
