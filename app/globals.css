@@ -429,7 +429,6 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
 
 .schedule-card {
   position: relative;
-  padding: 7px;
   border: 1px solid #c9c5bd;
   border-left: 3px solid var(--teal);
   background: #fff;
@@ -437,6 +436,78 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
 }
 
 .schedule-card.outbound { border-left-color: var(--orange); }
+.schedule-card > summary { list-style: none; }
+.schedule-card > summary::-webkit-details-marker { display: none; }
+
+.card-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 8px;
+  align-items: start;
+  min-height: 57px;
+  padding: 7px 26px 7px 7px;
+  cursor: pointer;
+}
+
+.card-summary:focus-visible {
+  outline: 2px solid var(--orange);
+  outline-offset: -2px;
+}
+
+.summary-primary,
+.summary-invoices {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.summary-invoices { grid-column: 1 / -1; }
+.summary-primary small,
+.summary-invoices small {
+  color: var(--muted);
+  font: 600 7px/1.1 "IBM Plex Mono", monospace;
+  letter-spacing: .05em;
+}
+
+.summary-primary strong,
+.summary-primary a,
+.summary-invoices > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font: 700 10px/1.25 "IBM Plex Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-primary a,
+.summary-invoices a {
+  color: var(--ink);
+  text-decoration-color: rgba(228, 87, 46, .55);
+  text-underline-offset: 2px;
+}
+
+.summary-invoices > span {
+  display: flex;
+  gap: 4px 7px;
+}
+
+.expand-mark {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  color: var(--muted);
+  font: 700 13px/1 "IBM Plex Mono", monospace;
+  transition: transform .16s ease;
+}
+
+.schedule-card[open] .expand-mark { transform: rotate(45deg); }
+
+.card-detail {
+  padding: 7px;
+  border-top: 1px solid #ece8df;
+}
+
 .card-topline { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
 .direction-label { color: var(--teal); font: 800 9px "IBM Plex Mono", monospace; letter-spacing: .08em; }
 .outbound .direction-label { color: var(--orange); }

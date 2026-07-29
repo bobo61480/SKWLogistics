@@ -48,6 +48,7 @@ type ScheduleItem = {
   vessel?: string;
   pod?: string;
   eta?: string;
+  isSmallParcel?: boolean;
 };
 
 const STATUS_OPTIONS = [
@@ -141,7 +142,12 @@ function importsCellUrl(row: number, column: string) {
 }
 
 function sourceRowUrl(item: ScheduleItem) {
-  if (item.direction === "inbound") return importsCellUrl(item.sourceRow, "A");
+  if (item.direction === "inbound") {
+    if (item.sourceSheet === "INBOUND SHIPMENTS DATA") {
+      return `${SHEET_URL}?gid=2026070701&range=A${item.sourceRow}#gid=2026070701&range=A${item.sourceRow}`;
+    }
+    return importsCellUrl(item.sourceRow, "A");
+  }
   if (item.sourceSheet === "Outbound Shipping Schedule") {
     return `${SHEET_URL}?gid=20260708&range=A${item.sourceRow}#gid=20260708&range=A${item.sourceRow}`;
   }
@@ -155,7 +161,10 @@ function sourceRowUrl(item: ScheduleItem) {
 }
 
 function officialTrackingUrl(container: string, carrierKey: string, fallback: string) {
-  const value = clean(container).replace(/\s+/g, "").toUpperCase();
+  const value = clean(container)
+    .replace(/^(TRACKING|TRACK|PRO)\s*#?\s*/i, "")
+    .replace(/\s+/g, "")
+    .toUpperCase();
   const carrier = clean(carrierKey).toUpperCase();
   if (!value) return "";
   if (/^1Z/.test(value)) return `https://www.ups.com/track?loc=en_US&tracknum=${encodeURIComponent(value)}`;
@@ -168,6 +177,7 @@ function officialTrackingUrl(container: string, carrierKey: string, fallback: st
   if (/FEDEX|FDX/.test(carrier)) {
     return `https://www.fedex.com/fedextrack/?trknbr=${encodeURIComponent(value)}`;
   }
+  if (/AMAZON/.test(carrier) || /^TBA/.test(value)) return "https://track.amazon.com/";
   if (/^(SMCU)|SMLM|SM LINES?/.test(`${value} ${carrier}`)) {
     return `https://esvc.smlines.com/smline/CUP_HOM_3301GS.do?_search=false&f_cmd=121&page=1&rows=10000&search_name=${encodeURIComponent(value)}&search_type=C&sidx=&sord=asc`;
   }
@@ -185,6 +195,50 @@ function officialTrackingUrl(container: string, carrierKey: string, fallback: st
     return `https://elines.coscoshipping.com/ebusiness/cargotracking?trackingType=CONTAINER&number=${encodeURIComponent(value)}`;
   }
   return fallback;
+}
+
+function correctedInboundInvoice(shipmentNo: string, value: string) {
+  if (/^OSL10(?:\s*-\s*2026)?$/i.test(clean(shipmentNo))) {
+    return clean(value).replace(/\bN00451013\b/g, "IN00451013");
+  }
+  return clean(value);
+}
+
+function parcelCarrier(value: string) {
+  const match = clean(value).match(/\b(UPS|FEDEX|DHL|USPS|AMAZON)\b/i);
+  return match ? match[1].toUpperCase().replace("FEDEX", "FedEx") : "";
+}
+
+function trackingCandidate(...values: string[]) {
+  const candidates = values
+    .flatMap((value) => clean(value).split(/\r?\n|,\s*/))
+    .map((value) => value.replace(/^(TRACKING|TRACK|PRO)\s*#?\s*/i, "").trim())
+    .filter(Boolean);
+  return (
+    candidates.find((value) =>
+      /^(1Z[A-Z0-9]{10,}|TBA[A-Z0-9]{8,}|JJD[A-Z0-9]{8,}|\d{10,22})$/i.test(
+        value.replace(/\s+/g, ""),
+      ),
+    ) ?? ""
+  ).replace(/\s+/g, "");
+}
+
+function firstDatedValue(...values: string[]) {
+  for (const value of values) {
+    const date = parseDate(clean(value));
+    if (date) {
+      const text = clean(value).match(/\d{1,2}\/\d{1,2}(?:\/\d{2,4})?/)?.[0] ?? clean(value);
+      return { date, text };
+    }
+  }
+  return null;
+}
+
+function sanitizeSecondary(value: string) {
+  return clean(value)
+    .split(/\s*·\s*/)
+    .filter((part) => part && !/^imported from\b/i.test(part))
+    .join(" · ");
 }
 
 function splitValues(value: string) {
@@ -240,45 +294,69 @@ function normalizeStatus(value: string) {
 function inboundItems(table: any): ScheduleItem[] {
   return (table.rows ?? []).flatMap((row: any, index: number) => {
     const eta = cell(row, 12);
-    const delivery = cell(row, 15);
-    const dateText = delivery || eta;
-    const date = parseDate(dateText);
-    const sourceRow = Number(cell(row, 17));
+    const expectedDelivery = cell(row, 14);
+    const importsSourceRow = Number(cell(row, 17));
     const shipmentNo = cell(row, 1);
     const container = cell(row, 6);
-    if (!date || !sourceRow || (!shipmentNo && !container)) return [];
-    const status = normalizeStatus(cell(row, 16));
     const mode = cell(row, 0);
+    const smallParcelCarrier = parcelCarrier([mode, shipmentNo].join(" "));
+    const isSmallParcel = Boolean(smallParcelCarrier);
+    const parcelTracking = isSmallParcel
+      ? trackingCandidate(container, shipmentNo, cell(row, 2), cell(row, 5), cell(row, 4))
+      : "";
+    const datedValue = isSmallParcel
+      ? firstDatedValue(expectedDelivery, eta, cell(row, 9), cell(row, 5), cell(row, 2))
+      : firstDatedValue(expectedDelivery, eta);
+    if (
+      !datedValue ||
+      (!importsSourceRow && !isSmallParcel) ||
+      (!shipmentNo && !container && !parcelTracking)
+    ) {
+      return [];
+    }
+    const { date, text: dateText } = datedValue;
+    const sourceRow = importsSourceRow || index + 4;
+    const status = normalizeStatus(cell(row, 16));
     const folderUrl = INBOUND_DOCUMENT_LINKS[shipmentNo] ?? importsCellUrl(sourceRow, "B");
     const carrierKey = [cell(row, 0), cell(row, 4), cell(row, 5), cell(row, 10), shipmentNo]
       .filter(Boolean)
       .join(" ");
+    const invoice = correctedInboundInvoice(shipmentNo, cell(row, 3));
+    const trackingNumber = parcelTracking || container;
     return [
       {
         id: `inbound-${sourceRow}-${index}`,
         direction: "inbound",
         date,
         dateText,
-        title: shipmentNo || container,
-        reference: container || cell(row, 3) || "Inbound shipment",
+        title: isSmallParcel ? trackingNumber || shipmentNo : shipmentNo || container,
+        reference: trackingNumber || invoice || "Inbound shipment",
         secondary: [cell(row, 0), cell(row, 10)].filter(Boolean).join(" · "),
         status,
-        sourceSheet: "IMPORTS",
+        sourceSheet: importsSourceRow ? "IMPORTS" : "INBOUND SHIPMENTS DATA",
         sourceRow,
         sourceUrl: SHEET_URL,
-        editable: true,
+        editable: Boolean(importsSourceRow),
         shipmentNo,
         shipmentUrl: folderUrl,
         container,
-        containerUrl: officialTrackingUrl(container, carrierKey, importsCellUrl(sourceRow, "H")),
+        containerUrl: officialTrackingUrl(
+          trackingNumber,
+          `${carrierKey} ${smallParcelCarrier}`,
+          importsCellUrl(sourceRow, "H"),
+        ),
         mbl: cell(row, 4),
         hbl: cell(row, 5),
-        invoice: cell(row, 3),
-        invoiceUrl: invoiceFileUrl(splitValues(cell(row, 3))[0] ?? ""),
+        invoice,
+        invoiceUrl: invoiceFileUrl(splitValues(invoice)[0] ?? ""),
         mode,
         vessel: cell(row, 10),
-        pod: mode === "Ocean" ? "USLAX" : mode ? "LAX" : "",
-        eta,
+        pod: /^OSL/i.test(shipmentNo) ? "LGB" : "LAX",
+        eta: expectedDelivery || (isSmallParcel ? dateText : eta),
+        carrier: smallParcelCarrier,
+        trackingNumber: isSmallParcel ? trackingNumber : "",
+        pro: isSmallParcel ? trackingNumber : "",
+        isSmallParcel,
       },
     ];
   });
@@ -546,7 +624,7 @@ function ScheduleCard({
 }) {
   const options = item.direction === "inbound" ? INBOUND_STATUS_OPTIONS : STATUS_OPTIONS;
   const sourceCellUrl = sourceRowUrl(item);
-  const valueLink = (label: string, value: string, href?: string) => (
+  const valueLink = (label: string, value: string, href?: string, blankWhenMissing = false) => (
     <div className="data-field">
       <dt>{label}</dt>
       <dd>
@@ -555,66 +633,123 @@ function ScheduleCard({
             {value} <span aria-hidden="true">↗</span>
           </a>
         ) : (
-          value || "—"
+          value || (blankWhenMissing ? "" : "—")
         )}
       </dd>
     </div>
   );
+  const invoiceLinks = (item.invoice ? splitValues(item.invoice) : []).map((invoice) =>
+    item.direction === "inbound" ? (
+      <a key={invoice} href={invoiceFileUrl(invoice)} target="_blank" rel="noreferrer">
+        {invoice} <span aria-hidden="true">↗</span>
+      </a>
+    ) : (
+      <span key={invoice}>{invoice}</span>
+    ),
+  );
+  const summaryPrimary =
+    item.direction === "outbound"
+      ? item.customerNo ?? item.customer ?? item.title
+      : item.isSmallParcel
+        ? item.trackingNumber ?? item.pro ?? item.title
+        : item.shipmentNo ?? item.title;
+  const summaryHref =
+    item.direction === "inbound"
+      ? item.isSmallParcel
+        ? item.containerUrl
+        : item.shipmentUrl
+      : undefined;
+  const secondary = sanitizeSecondary(item.secondary);
+
   return (
-    <article className={`schedule-card ${item.direction}`}>
-      <div className="card-topline">
-        <span className="direction-label">{item.direction === "inbound" ? "IN" : "OUT"}</span>
-        <span className={statusClass(item.status)}>{item.status}</span>
-      </div>
-      {item.direction === "inbound" ? (
-        <dl className="data-grid inbound-data">
-          {valueLink("Shipment", item.shipmentNo ?? item.title, item.shipmentUrl)}
-          {valueLink(
-            "Invoice #",
-            splitValues(item.invoice ?? "").join(" · "),
-            item.invoiceUrl,
+    <details className={`schedule-card ${item.direction}`}>
+      <summary className="card-summary">
+        <span className="summary-primary">
+          <small>{item.isSmallParcel ? "TRACKING" : item.direction === "inbound" ? "SHIPMENT" : "CUSTOMER"}</small>
+          {summaryHref ? (
+            <a href={summaryHref} target="_blank" rel="noreferrer">{summaryPrimary} ↗</a>
+          ) : (
+            <strong>{summaryPrimary}</strong>
           )}
-          {valueLink("Container #", item.container ?? "", item.containerUrl)}
-        </dl>
-      ) : (
-        <dl className="data-grid outbound-data">
-          {valueLink("Customer #", item.customerNo ?? item.customer ?? item.title)}
-          {valueLink("PO # / Invoice #", [item.po, item.invoice].filter(Boolean).join(" · "))}
-          {valueLink("Carrier", item.carrier ?? "")}
-          {valueLink("Booking / Pickup / Load / BOL #", item.carrierReference ?? "")}
-          {valueLink("Tracking # / PRO #", item.trackingNumber ?? item.pro ?? "")}
-        </dl>
-      )}
-      <p className="secondary">{item.secondary || item.sourceSheet}</p>
-      <div className="card-actions">
-        {item.editable ? (
-          <label className="status-field">
-            <span>Status</span>
-            <select
-              aria-label={`Update ${item.title} status`}
-              disabled={saving}
-              value={options.includes(item.status) ? item.status : "Scheduled"}
-              onChange={(event) => onStatus(item, event.target.value)}
-            >
-              {options.map((option) => (
-                <option key={option}>{option}</option>
-              ))}
-            </select>
-          </label>
+        </span>
+        <span className="summary-invoices">
+          <small>INVOICE #</small>
+          <span>{invoiceLinks.length ? invoiceLinks : "—"}</span>
+        </span>
+        <span className="expand-mark" aria-hidden="true">＋</span>
+      </summary>
+
+      <div className="card-detail">
+        <div className="card-topline">
+          <span className="direction-label">
+            {item.isSmallParcel ? item.carrier || "PARCEL" : item.direction === "inbound" ? "IN" : "OUT"}
+          </span>
+          <span className={statusClass(item.status)}>{item.status}</span>
+        </div>
+        {item.direction === "inbound" ? (
+          item.isSmallParcel ? (
+            <dl className="data-grid inbound-data">
+              {valueLink("Tracking / PRO #", item.trackingNumber ?? item.pro ?? "", item.containerUrl)}
+              {valueLink("Invoice #", splitValues(item.invoice ?? "").join(" · "), item.invoiceUrl)}
+              {valueLink("Carrier", item.carrier ?? "")}
+              {valueLink("ETA", item.eta ?? item.dateText)}
+            </dl>
+          ) : (
+            <dl className="data-grid inbound-data">
+              {valueLink("Shipment", item.shipmentNo ?? item.title, item.shipmentUrl)}
+              {valueLink("Invoice #", splitValues(item.invoice ?? "").join(" · "), item.invoiceUrl)}
+              {valueLink("Container #", item.container ?? "", item.containerUrl)}
+              {valueLink("MBL", item.mbl ?? "")}
+              {valueLink("HBL", item.hbl ?? "")}
+              {valueLink("VSL", item.vessel ?? "")}
+              {valueLink("POD", item.pod ?? "")}
+              {valueLink("ETA", item.eta ?? item.dateText)}
+            </dl>
+          )
         ) : (
-          <span className="read-only-label">READ ONLY</span>
+          <dl className="data-grid outbound-data">
+            {valueLink("Customer #", item.customerNo ?? item.customer ?? item.title)}
+            {valueLink("PO # / Invoice #", [item.po, item.invoice].filter(Boolean).join(" · "), undefined, true)}
+            {item.carrier ? valueLink("Carrier", item.carrier) : null}
+            {item.carrierReference
+              ? valueLink("Booking / Pickup / Load / BOL #", item.carrierReference)
+              : null}
+            {item.trackingNumber || item.pro
+              ? valueLink("Tracking # / PRO #", item.trackingNumber ?? item.pro ?? "")
+              : null}
+          </dl>
         )}
-        <a
-          className="source-link"
-          href={sourceCellUrl}
-          target="_blank"
-          rel="noreferrer"
-          aria-label={`Open ${item.sourceSheet} source row`}
-        >
-          SOURCE · ROW {item.sourceRow} ↗
-        </a>
+        {secondary ? <p className="secondary">{secondary}</p> : null}
+        <div className="card-actions">
+          {item.editable ? (
+            <label className="status-field">
+              <span>Status</span>
+              <select
+                aria-label={`Update ${item.title} status`}
+                disabled={saving}
+                value={options.includes(item.status) ? item.status : "Scheduled"}
+                onChange={(event) => onStatus(item, event.target.value)}
+              >
+                {options.map((option) => (
+                  <option key={option}>{option}</option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <span className="read-only-label">READ ONLY</span>
+          )}
+          <a
+            className="source-link"
+            href={sourceCellUrl}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={`Open ${item.sourceSheet} source row`}
+          >
+            SOURCE · ROW {item.sourceRow} ↗
+          </a>
+        </div>
       </div>
-    </article>
+    </details>
   );
 }
 
@@ -791,7 +926,10 @@ export default function Home() {
   );
 
   const importScheduleItems = useMemo(
-    () => inboundVisibleItems.filter((item) => !finished.has(item.status.toLowerCase())),
+    () =>
+      inboundVisibleItems.filter(
+        (item) => !item.isSmallParcel && !finished.has(item.status.toLowerCase()),
+      ),
     [inboundVisibleItems],
   );
 
