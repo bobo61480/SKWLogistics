@@ -4,6 +4,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 const SHEET_ID = "1M-vZ24Yw4ZN7R7b_473cVn8kny8DznTakSsD3VQsCzc";
 const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`;
+const NATIONAL_SHEET_ID = "12Aty04yiLPPqz06AFDM8Y1Log2jEOqdXDqwiUV5yVX8";
+const NATIONAL_SHEET_URL = `https://docs.google.com/spreadsheets/d/${NATIONAL_SHEET_ID}/edit?gid=99300389#gid=99300389`;
+const SALES_SHEET_ID = "14lH9SQzTLj8MR7UbxMfkoTDDlzhPoE8CqHV3IpK450I";
+const SALES_SHEET_URL = `https://docs.google.com/spreadsheets/d/${SALES_SHEET_ID}/edit?gid=0#gid=0`;
 const WRITE_ENDPOINT =
   "https://script.google.com/a/macros/stylekoreanus.com/s/AKfycbwyVnU2jvOtMFXuY7KtX_8-hHXYVLrc6R2Dr_6akdDaTGQPc8duSo7tpguIuk00MjDl/exec";
 
@@ -20,6 +24,8 @@ type ScheduleItem = {
   status: string;
   sourceSheet: string;
   sourceRow: number;
+  sourceUrl?: string;
+  editable?: boolean;
   customer?: string;
   invoice?: string;
   shipmentNo?: string;
@@ -116,8 +122,13 @@ function statusClass(status: string) {
   return "status";
 }
 
-async function fetchTable(gid: number, range: string, headers: number) {
-  const url = new URL(`https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq`);
+async function fetchTable(
+  spreadsheetId: string,
+  gid: number,
+  range: string,
+  headers: number,
+) {
+  const url = new URL(`https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq`);
   url.searchParams.set("tqx", "out:json");
   url.searchParams.set("gid", String(gid));
   url.searchParams.set("range", range);
@@ -160,6 +171,8 @@ function inboundItems(table: any): ScheduleItem[] {
         status,
         sourceSheet: "IMPORTS",
         sourceRow,
+        sourceUrl: SHEET_URL,
+        editable: true,
         shipmentNo,
         container,
         mbl: cell(row, 4),
@@ -192,9 +205,80 @@ function outboundItems(table: any): ScheduleItem[] {
         status,
         sourceSheet: "Outbound Shipping Schedule",
         sourceRow,
+        sourceUrl: SHEET_URL,
+        editable: true,
         customer,
         invoice,
         pro: cell(row, 18),
+        shipDate,
+      },
+    ];
+  });
+}
+
+function nationalOutboundItems(table: any): ScheduleItem[] {
+  return (table.rows ?? []).flatMap((row: any, index: number) => {
+    const pickupDate = cell(row, 9);
+    const startShip = cell(row, 7);
+    const cancelDate = cell(row, 8);
+    const dateText = pickupDate || startShip || cancelDate;
+    const date = parseDate(dateText);
+    const channel = cell(row, 1);
+    if (!date || !channel) return [];
+    const sourceRow = index + 2;
+    const order = cell(row, 3);
+    const po = cell(row, 5);
+    return [
+      {
+        id: `national-outbound-${sourceRow}`,
+        direction: "outbound",
+        date,
+        dateText,
+        title: channel,
+        reference: order || po || "National order",
+        secondary: [cell(row, 2), cell(row, 11), cell(row, 12)]
+          .filter(Boolean)
+          .join(" · "),
+        status: normalizeStatus(cell(row, 0)),
+        sourceSheet: "NATIONAL ORDER PROGRESS",
+        sourceRow,
+        sourceUrl: NATIONAL_SHEET_URL,
+        editable: false,
+        customer: channel,
+        invoice: order || po,
+        shipDate: dateText,
+      },
+    ];
+  });
+}
+
+function salesOutboundItems(table: any): ScheduleItem[] {
+  return (table.rows ?? []).flatMap((row: any, index: number) => {
+    const shipDate = cell(row, 4);
+    const date = parseDate(shipDate);
+    const customer = cell(row, 2);
+    if (!date || !customer) return [];
+    const sourceRow = index + 3;
+    const issue = cell(row, 7);
+    const status = /yes|issue|hold|pending/i.test(issue) ? "Pending" : "Scheduled";
+    return [
+      {
+        id: `sales-outbound-${sourceRow}`,
+        direction: "outbound",
+        date,
+        dateText: shipDate,
+        title: customer,
+        reference: cell(row, 1) || "Sales shipment",
+        secondary: [cell(row, 3), cell(row, 5), issue && `Issue: ${issue}`]
+          .filter(Boolean)
+          .join(" · "),
+        status,
+        sourceSheet: "Stylekorean",
+        sourceRow,
+        sourceUrl: SALES_SHEET_URL,
+        editable: false,
+        customer,
+        invoice: cell(row, 1),
         shipDate,
       },
     ];
@@ -259,20 +343,113 @@ function ScheduleCard({
       <h3>{item.title}</h3>
       <p className="reference">{item.reference}</p>
       <p className="secondary">{item.secondary || item.sourceSheet}</p>
-      <label className="status-field">
-        <span>Update source status</span>
-        <select
-          aria-label={`Update ${item.title} status`}
-          disabled={saving}
-          value={options.includes(item.status) ? item.status : "Scheduled"}
-          onChange={(event) => onStatus(item, event.target.value)}
+      {item.editable ? (
+        <label className="status-field">
+          <span>Update source status</span>
+          <select
+            aria-label={`Update ${item.title} status`}
+            disabled={saving}
+            value={options.includes(item.status) ? item.status : "Scheduled"}
+            onChange={(event) => onStatus(item, event.target.value)}
+          >
+            {options.map((option) => (
+              <option key={option}>{option}</option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <a
+          className="source-link"
+          href={item.sourceUrl}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`Open ${item.sourceSheet} source row`}
         >
-          {options.map((option) => (
-            <option key={option}>{option}</option>
-          ))}
-        </select>
-      </label>
+          {item.sourceSheet} · ROW {item.sourceRow} ↗
+        </a>
+      )}
     </article>
+  );
+}
+
+function ScheduleBoard({
+  direction,
+  days,
+  items,
+  loading,
+  savingId,
+  onStatus,
+}: {
+  direction: Direction;
+  days: Date[];
+  items: ScheduleItem[];
+  loading: boolean;
+  savingId: string;
+  onStatus: (item: ScheduleItem, status: string) => void;
+}) {
+  const isInbound = direction === "inbound";
+  return (
+    <section
+      className={`schedule-panel ${direction}-panel`}
+      aria-labelledby={`${direction}-schedule-heading`}
+    >
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">
+            {isInbound ? "TOP BOARD · ARRIVALS" : "BOTTOM BOARD · DEPARTURES"}
+          </p>
+          <h2 id={`${direction}-schedule-heading`}>
+            {isInbound ? "Inbound schedule" : "Outbound schedule"}
+          </h2>
+        </div>
+        <div className={`board-total ${direction}`}>
+          <span>{isInbound ? "INBOUND" : "OUTBOUND"}</span>
+          <strong>{items.length}</strong>
+          <small>moves · next 14 days</small>
+        </div>
+      </div>
+      <div className="board-wrap">
+        <div className="board">
+          {days.map((day, index) => {
+            const dayItems = items.filter((item) => dayKey(item.date) === dayKey(day));
+            return (
+              <section
+                className={index === 0 ? "day-column today" : "day-column"}
+                key={`${direction}-${dayKey(day)}`}
+              >
+                <header>
+                  <span>
+                    {day.toLocaleDateString("en-US", { weekday: "short" }).toUpperCase()}
+                  </span>
+                  <strong>{day.getDate()}</strong>
+                  <small>
+                    {day.toLocaleDateString("en-US", { month: "short" }).toUpperCase()}
+                  </small>
+                  <b>{dayItems.length}</b>
+                </header>
+                <div className="day-items">
+                  {dayItems.map((item) => (
+                    <ScheduleCard
+                      key={item.id}
+                      item={item}
+                      saving={savingId === item.id}
+                      onStatus={onStatus}
+                    />
+                  ))}
+                  {!loading && dayItems.length === 0 && (
+                    <div className="empty-day">
+                      <span>—</span>
+                      No {direction} moves
+                    </div>
+                  )}
+                  {loading && <div className="loading-card" />}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -282,7 +459,6 @@ export default function Home() {
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [query, setQuery] = useState("");
-  const [direction, setDirection] = useState<"all" | Direction>("all");
   const [includeFinished, setIncludeFinished] = useState(false);
   const [savingId, setSavingId] = useState("");
   const [notice, setNotice] = useState("");
@@ -300,11 +476,18 @@ export default function Home() {
     setLoading(true);
     setError("");
     try {
-      const [inbound, outbound] = await Promise.all([
-        fetchTable(2026070701, "A3:S1200", 1),
-        fetchTable(20260708, "A2:X1000", 0),
+      const [inbound, outbound, nationalOutbound, salesOutbound] = await Promise.all([
+        fetchTable(SHEET_ID, 2026070701, "A3:S1200", 1),
+        fetchTable(SHEET_ID, 20260708, "A2:X1000", 0),
+        fetchTable(NATIONAL_SHEET_ID, 99300389, "A1:U3500", 1),
+        fetchTable(SALES_SHEET_ID, 0, "A2:AF4200", 1),
       ]);
-      setItems([...inboundItems(inbound), ...outboundItems(outbound)]);
+      setItems([
+        ...inboundItems(inbound),
+        ...outboundItems(outbound),
+        ...nationalOutboundItems(nationalOutbound),
+        ...salesOutboundItems(salesOutbound),
+      ]);
       setUpdatedAt(new Date());
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "The live schedule could not be loaded.");
@@ -326,7 +509,6 @@ export default function Home() {
     return items.filter((item) => {
       const stamp = new Date(item.date.getFullYear(), item.date.getMonth(), item.date.getDate()).getTime();
       if (stamp < first || stamp > last) return false;
-      if (direction !== "all" && item.direction !== direction) return false;
       if (!includeFinished && finished.has(item.status.toLowerCase())) return false;
       if (!needle) return true;
       return [item.title, item.reference, item.secondary, item.status, item.sourceSheet]
@@ -334,7 +516,17 @@ export default function Home() {
         .toLowerCase()
         .includes(needle);
     });
-  }, [days, direction, includeFinished, items, query]);
+  }, [days, includeFinished, items, query]);
+
+  const inboundVisibleItems = useMemo(
+    () => visibleItems.filter((item) => item.direction === "inbound"),
+    [visibleItems],
+  );
+
+  const outboundVisibleItems = useMemo(
+    () => visibleItems.filter((item) => item.direction === "outbound"),
+    [visibleItems],
+  );
 
   const counts = useMemo(() => {
     const today = dayKey(days[0]);
@@ -395,15 +587,23 @@ export default function Home() {
             <button className="button primary" onClick={load} disabled={loading}>
               {loading ? "SYNCING…" : "↻ REFRESH DATA"}
             </button>
-            <a className="button secondary" href={SHEET_URL} target="_blank" rel="noreferrer">
-              OPEN SOURCE SHEET ↗
-            </a>
+            <div className="source-buttons" aria-label="Source workbooks">
+              <a className="button secondary" href={SHEET_URL} target="_blank" rel="noreferrer">
+                MASTER
+              </a>
+              <a className="button secondary" href={NATIONAL_SHEET_URL} target="_blank" rel="noreferrer">
+                NATIONAL
+              </a>
+              <a className="button secondary" href={SALES_SHEET_URL} target="_blank" rel="noreferrer">
+                SALES
+              </a>
+            </div>
           </div>
         </div>
         <div className="sync-strip" role="status" aria-live="polite">
           <span>
             <b className={error ? "sync-dot error" : loading ? "sync-dot loading" : "sync-dot"} />
-            {error ? "Workbook connection needs attention" : loading ? "Syncing live records…" : "Live workbook connected"}
+            {error ? "Workbook connection needs attention" : loading ? "Syncing live records…" : "3 live workbooks connected"}
           </span>
           <span className="mono">
             LAST SYNC {updatedAt ? updatedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "America/Los_Angeles" }) : "—"}
@@ -451,17 +651,6 @@ export default function Home() {
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
-        <div className="segmented" aria-label="Direction filter">
-          {(["all", "inbound", "outbound"] as const).map((value) => (
-            <button
-              key={value}
-              className={direction === value ? "selected" : ""}
-              onClick={() => setDirection(value)}
-            >
-              {value}
-            </button>
-          ))}
-        </div>
         <label className="finished-toggle">
           <input
             type="checkbox"
@@ -472,54 +661,24 @@ export default function Home() {
         </label>
       </section>
 
-      <section className="schedule-panel" aria-labelledby="schedule-heading">
-        <div className="panel-heading">
-          <div>
-            <p className="eyebrow">ROLLING WINDOW · PACIFIC TIME</p>
-            <h2 id="schedule-heading">Next 14 days</h2>
-          </div>
-          <div className="legend" aria-label="Schedule legend">
-            <span><i className="legend-in" />Inbound</span>
-            <span><i className="legend-out" />Outbound</span>
-          </div>
-        </div>
-        <div className="board-wrap">
-          <div className="board">
-            {days.map((day, index) => {
-              const dayItems = visibleItems
-                .filter((item) => dayKey(item.date) === dayKey(day))
-                .sort((a, b) => a.direction.localeCompare(b.direction));
-              return (
-                <section className={index === 0 ? "day-column today" : "day-column"} key={dayKey(day)}>
-                  <header>
-                    <span>{day.toLocaleDateString("en-US", { weekday: "short" }).toUpperCase()}</span>
-                    <strong>{day.getDate()}</strong>
-                    <small>{day.toLocaleDateString("en-US", { month: "short" }).toUpperCase()}</small>
-                    <b>{dayItems.length}</b>
-                  </header>
-                  <div className="day-items">
-                    {dayItems.map((item) => (
-                      <ScheduleCard
-                        key={item.id}
-                        item={item}
-                        saving={savingId === item.id}
-                        onStatus={handleStatus}
-                      />
-                    ))}
-                    {!loading && dayItems.length === 0 && (
-                      <div className="empty-day">
-                        <span>—</span>
-                        No scheduled moves
-                      </div>
-                    )}
-                    {loading && <div className="loading-card" />}
-                  </div>
-                </section>
-              );
-            })}
-          </div>
-        </div>
-      </section>
+      <div className="schedule-stack" aria-label="Separate inbound and outbound schedules">
+        <ScheduleBoard
+          direction="inbound"
+          days={days}
+          items={inboundVisibleItems}
+          loading={loading}
+          savingId={savingId}
+          onStatus={handleStatus}
+        />
+        <ScheduleBoard
+          direction="outbound"
+          days={days}
+          items={outboundVisibleItems}
+          loading={loading}
+          savingId={savingId}
+          onStatus={handleStatus}
+        />
+      </div>
 
       <footer>
         <p><strong>SK</strong> STYLEKOREAN LOGISTICS · COMPANY OPERATIONS</p>
