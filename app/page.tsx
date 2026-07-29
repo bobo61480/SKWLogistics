@@ -49,7 +49,23 @@ type ScheduleItem = {
   pod?: string;
   eta?: string;
   isSmallParcel?: boolean;
+  shippingMethod?: string;
+  sourceType?: string;
 };
+
+const SOURCE_LEGEND = [
+  "Wholesale",
+  "Ocean",
+  "Air",
+  "UPS (Parcel)",
+  "FedEx (Parcel)",
+  "USPS",
+  "Amazon",
+  "DHL (Small Parcel)",
+  "UPS (Freight)",
+  "FedEx (Freight)",
+  "DHL (Freight)",
+];
 
 const STATUS_OPTIONS = [
   "Scheduled",
@@ -209,6 +225,30 @@ function parcelCarrier(value: string) {
   return match ? match[1].toUpperCase().replace("FEDEX", "FedEx") : "";
 }
 
+function sourceClass(value: string) {
+  const normalized = clean(value).toLowerCase();
+  if (normalized === "ocean") return "source-ocean";
+  if (normalized === "air") return "source-air";
+  if (normalized === "wholesale") return "source-wholesale";
+  if (normalized.includes("ups") && normalized.includes("freight")) return "source-ups-freight";
+  if (normalized.includes("fedex") && normalized.includes("freight")) return "source-fedex-freight";
+  if (normalized.includes("dhl") && normalized.includes("freight")) return "source-dhl-freight";
+  if (normalized.includes("ups")) return "source-ups-parcel";
+  if (normalized.includes("fedex")) return "source-fedex-parcel";
+  if (normalized.includes("dhl")) return "source-dhl-parcel";
+  if (normalized.includes("usps")) return "source-usps";
+  if (normalized.includes("amazon")) return "source-amazon";
+  return "source-wholesale";
+}
+
+function outboundSourceType(carrier: string, isSmallParcel: boolean) {
+  const name = parcelCarrier(carrier);
+  if (!name) return "Wholesale";
+  if (name === "USPS" || name === "AMAZON") return name === "AMAZON" ? "Amazon" : "USPS";
+  if (name === "DHL") return isSmallParcel ? "DHL (Small Parcel)" : "DHL (Freight)";
+  return `${name} (${isSmallParcel ? "Parcel" : "Freight"})`;
+}
+
 function trackingCandidate(...values: string[]) {
   const candidates = values
     .flatMap((value) => clean(value).split(/\r?\n|,\s*/))
@@ -298,7 +338,8 @@ function inboundItems(table: any): ScheduleItem[] {
     const importsSourceRow = Number(cell(row, 17));
     const shipmentNo = cell(row, 1);
     const container = cell(row, 6);
-    const mode = cell(row, 0);
+    const reportedMode = cell(row, 0);
+    const mode = /^JSL260726$/i.test(shipmentNo) ? "Air" : reportedMode;
     const smallParcelCarrier = parcelCarrier([mode, shipmentNo].join(" "));
     const isSmallParcel = Boolean(smallParcelCarrier);
     const parcelTracking = isSmallParcel
@@ -357,6 +398,12 @@ function inboundItems(table: any): ScheduleItem[] {
         trackingNumber: isSmallParcel ? trackingNumber : "",
         pro: isSmallParcel ? trackingNumber : "",
         isSmallParcel,
+        shippingMethod: isSmallParcel ? smallParcelCarrier : mode,
+        sourceType: isSmallParcel
+          ? outboundSourceType(smallParcelCarrier, true)
+          : mode === "Ocean"
+            ? "Ocean"
+            : "Air",
       },
     ];
   });
@@ -416,7 +463,7 @@ function ImportSchedules({
           </thead>
           <tbody>
             {sortedItems.map((item) => (
-              <tr key={`import-${item.id}`}>
+              <tr className={sourceClass(item.sourceType ?? item.mode ?? "")} key={`import-${item.id}`}>
                 <td><span className={`mode-pill ${item.mode?.toLowerCase()}`}>{item.mode || "—"}</span></td>
                 <td>{linkValue(item.shipmentNo ?? item.title, item.shipmentUrl)}</td>
                 <td>
@@ -494,6 +541,8 @@ function outboundItems(table: any): ScheduleItem[] {
         carrierReference: carrierRefs.carrierReference || cell(row, 19),
         trackingNumber: carrierRefs.trackingNumber,
         shipDate,
+        shippingMethod: "Trucking",
+        sourceType: outboundSourceType(carrier, false),
       },
     ];
   });
@@ -507,7 +556,8 @@ function nationalOutboundItems(table: any): ScheduleItem[] {
     const dateText = pickupDate || startShip || cancelDate;
     const date = parseDate(dateText);
     const channel = cell(row, 1);
-    if (!date || !channel) return [];
+    const shippingMethod = cell(row, 11);
+    if (!date || !channel || !/^trucking$/i.test(shippingMethod)) return [];
     const sourceRow = index + 2;
     const order = cell(row, 3);
     const po = cell(row, 5);
@@ -519,7 +569,7 @@ function nationalOutboundItems(table: any): ScheduleItem[] {
         dateText,
         title: channel,
         reference: order || po || "National order",
-        secondary: [cell(row, 2), cell(row, 11), cell(row, 12)]
+        secondary: [cell(row, 2), cell(row, 12)]
           .filter(Boolean)
           .join(" · "),
         status: normalizeStatus(cell(row, 0)),
@@ -531,9 +581,11 @@ function nationalOutboundItems(table: any): ScheduleItem[] {
         customerNo: channel,
         po,
         invoice: order,
-        carrier: cell(row, 11),
-        carrierReference: cell(row, 10),
+        carrier: "",
+        carrierReference: "",
         shipDate: dateText,
+        shippingMethod: "Trucking",
+        sourceType: "Wholesale",
       },
     ];
   });
@@ -544,10 +596,17 @@ function salesOutboundItems(table: any): ScheduleItem[] {
     const shipDate = cell(row, 4);
     const date = parseDate(shipDate);
     const customer = cell(row, 2);
-    if (!date || !customer) return [];
+    const shippingMethod = cell(row, 5);
+    const carrier = parcelCarrier(shippingMethod);
+    const isSmallParcel = Boolean(carrier) && !/truck/i.test(shippingMethod);
+    const isTrucking = /\btruck(?:ing)?\b/i.test(shippingMethod);
+    if (!date || !customer || (!isSmallParcel && !isTrucking)) return [];
     const sourceRow = index + 3;
     const issue = cell(row, 7);
     const status = /yes|issue|hold|pending/i.test(issue) ? "Pending" : "Scheduled";
+    const trackingNumber = isSmallParcel
+      ? trackingCandidate(...Array.from({ length: 24 }, (_, offset) => cell(row, offset + 8)))
+      : "";
     return [
       {
         id: `sales-outbound-${sourceRow}`,
@@ -555,7 +614,7 @@ function salesOutboundItems(table: any): ScheduleItem[] {
         date,
         dateText: shipDate,
         title: customer,
-        reference: cell(row, 1) || "Sales shipment",
+        reference: trackingNumber || cell(row, 1) || "Sales shipment",
         secondary: [cell(row, 3), cell(row, 5), issue && `Issue: ${issue}`]
           .filter(Boolean)
           .join(" · "),
@@ -567,8 +626,27 @@ function salesOutboundItems(table: any): ScheduleItem[] {
         customer,
         customerNo: customer,
         invoice: cell(row, 1),
-        carrier: cell(row, 5),
+        carrier: carrier || shippingMethod,
+        trackingNumber,
+        pro: trackingNumber,
+        containerUrl: trackingNumber
+          ? officialTrackingUrl(trackingNumber, carrier, sourceRowUrl({
+              id: "",
+              direction: "outbound",
+              date,
+              dateText: shipDate,
+              title: customer,
+              reference: "",
+              secondary: "",
+              status,
+              sourceSheet: "Stylekorean",
+              sourceRow,
+            }))
+          : "",
         shipDate,
+        isSmallParcel,
+        shippingMethod: isTrucking ? "Trucking" : shippingMethod,
+        sourceType: outboundSourceType(carrier || shippingMethod, isSmallParcel),
       },
     ];
   });
@@ -662,7 +740,7 @@ function ScheduleCard({
   const secondary = sanitizeSecondary(item.secondary);
 
   return (
-    <details className={`schedule-card ${item.direction}`}>
+    <details className={`schedule-card ${item.direction} ${sourceClass(item.sourceType ?? "")}`}>
       <summary className="card-summary">
         <span className="summary-primary">
           <small>{item.isSmallParcel ? "TRACKING" : item.direction === "inbound" ? "SHIPMENT" : "CUSTOMER"}</small>
@@ -681,8 +759,8 @@ function ScheduleCard({
 
       <div className="card-detail">
         <div className="card-topline">
-          <span className="direction-label">
-            {item.isSmallParcel ? item.carrier || "PARCEL" : item.direction === "inbound" ? "IN" : "OUT"}
+          <span className="direction-label source-badge">
+            {item.sourceType || (item.direction === "inbound" ? "Inbound" : "Wholesale")}
           </span>
           <span className={statusClass(item.status)}>{item.status}</span>
         </div>
@@ -753,6 +831,69 @@ function ScheduleCard({
   );
 }
 
+function SmallParcelSchedule({
+  items,
+  loading,
+}: {
+  items: ScheduleItem[];
+  loading: boolean;
+}) {
+  const sortedItems = [...items].sort((a, b) => a.date.getTime() - b.date.getTime());
+
+  return (
+    <section className="parcel-panel" aria-labelledby="small-parcel-heading">
+      <div className="panel-heading parcel-heading">
+        <div>
+          <p className="eyebrow">UPS · FEDEX · USPS · DHL · AMAZON</p>
+          <h2 id="small-parcel-heading">Outbound Schedule (Small Parcels)</h2>
+        </div>
+        <div className="parcel-total">
+          <strong>{sortedItems.length}</strong>
+          <span>active</span>
+        </div>
+      </div>
+      <div className="parcel-grid">
+        {sortedItems.map((item) => {
+          const tracking = item.trackingNumber || item.pro || "";
+          return (
+            <article
+              className={`parcel-card ${sourceClass(item.sourceType ?? "")}`}
+              key={`parcel-${item.id}`}
+            >
+              <div className="parcel-topline">
+                <span className="source-badge">{item.sourceType || item.carrier || "Parcel"}</span>
+                <span className={statusClass(item.status)}>{item.status}</span>
+              </div>
+              <strong className="parcel-tracking">{tracking || "Tracking pending"}</strong>
+              <p>
+                {[item.invoice && `Invoice # ${item.invoice}`, item.customer]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+              <div className="parcel-footer">
+                <span><b>ETA</b> {item.dateText || "—"}</span>
+                {tracking && item.containerUrl ? (
+                  <a href={item.containerUrl} target="_blank" rel="noreferrer">
+                    Track ↗
+                  </a>
+                ) : (
+                  <a href={sourceRowUrl(item)} target="_blank" rel="noreferrer">
+                    Source ↗
+                  </a>
+                )}
+              </div>
+            </article>
+          );
+        })}
+        {!loading && sortedItems.length === 0 && (
+          <div className="parcel-empty">No small-parcel shipments in the active 14-day window.</div>
+        )}
+        {loading && <div className="loading-card" />}
+      </div>
+    </section>
+  );
+}
+
 function ScheduleBoard({
   direction,
   days,
@@ -776,7 +917,7 @@ function ScheduleBoard({
     >
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">{isInbound ? "ARRIVALS" : "DEPARTURES"}</p>
+          <p className="eyebrow">{isInbound ? "ARRIVALS" : "DEPARTURES · TRUCKING ONLY"}</p>
           <h2 id={`${direction}-schedule-heading`}>
             {isInbound ? "Inbound schedule" : "Outbound schedule"}
           </h2>
@@ -921,7 +1062,18 @@ export default function Home() {
   );
 
   const outboundVisibleItems = useMemo(
-    () => visibleItems.filter((item) => item.direction === "outbound"),
+    () =>
+      visibleItems.filter(
+        (item) =>
+          item.direction === "outbound" &&
+          !item.isSmallParcel &&
+          /^trucking$/i.test(item.shippingMethod ?? ""),
+      ),
+    [visibleItems],
+  );
+
+  const outboundParcelVisibleItems = useMemo(
+    () => visibleItems.filter((item) => item.direction === "outbound" && item.isSmallParcel),
     [visibleItems],
   );
 
@@ -936,13 +1088,13 @@ export default function Home() {
   const counts = useMemo(() => {
     const today = dayKey(days[0]);
     const inbound = visibleItems.filter((item) => item.direction === "inbound").length;
-    const outbound = visibleItems.filter((item) => item.direction === "outbound").length;
+    const outbound = outboundVisibleItems.length + outboundParcelVisibleItems.length;
     const dueToday = visibleItems.filter((item) => dayKey(item.date) === today).length;
     const exceptions = visibleItems.filter((item) =>
       /pending|delay|hold|review/i.test(item.status),
     ).length;
     return { inbound, outbound, dueToday, exceptions };
-  }, [days, visibleItems]);
+  }, [days, outboundParcelVisibleItems, outboundVisibleItems, visibleItems]);
 
   const handleStatus = async (item: ScheduleItem, status: string) => {
     setSavingId(item.id);
@@ -1064,6 +1216,18 @@ export default function Home() {
         </label>
       </section>
 
+      <section className="source-legend" aria-label="Entry source colors">
+        <strong>Source colors</strong>
+        <div>
+          {SOURCE_LEGEND.map((source) => (
+            <span className={sourceClass(source)} key={source}>
+              <i aria-hidden="true" />
+              {source}
+            </span>
+          ))}
+        </div>
+      </section>
+
       <ImportSchedules items={importScheduleItems} loading={loading} />
 
       <div className="schedule-stack" aria-label="Separate inbound and outbound schedules">
@@ -1083,6 +1247,7 @@ export default function Home() {
           savingId={savingId}
           onStatus={handleStatus}
         />
+        <SmallParcelSchedule items={outboundParcelVisibleItems} loading={loading} />
       </div>
 
       <footer>
