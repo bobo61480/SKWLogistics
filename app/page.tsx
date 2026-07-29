@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { INBOUND_DOCUMENT_LINKS } from "./inbound-links";
+import { INBOUND_INVOICE_LINKS } from "./inbound-invoice-links";
 
 const SHEET_ID = "1M-vZ24Yw4ZN7R7b_473cVn8kny8DznTakSsD3VQsCzc";
 const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`;
@@ -43,6 +44,10 @@ type ScheduleItem = {
   carrierReference?: string;
   trackingNumber?: string;
   shipDate?: string;
+  mode?: string;
+  vessel?: string;
+  pod?: string;
+  eta?: string;
 };
 
 const STATUS_OPTIONS = [
@@ -189,6 +194,14 @@ function splitValues(value: string) {
     .filter(Boolean);
 }
 
+function driveInvoiceSearchUrl(invoice: string) {
+  return `https://drive.google.com/drive/u/0/search?q=${encodeURIComponent(invoice)}`;
+}
+
+function invoiceFileUrl(invoice: string) {
+  return INBOUND_INVOICE_LINKS[invoice] ?? driveInvoiceSearchUrl(invoice);
+}
+
 function classifyOutboundReference(value: string) {
   const text = clean(value);
   if (!text) return { carrierReference: "", trackingNumber: "" };
@@ -235,6 +248,7 @@ function inboundItems(table: any): ScheduleItem[] {
     const container = cell(row, 6);
     if (!date || !sourceRow || (!shipmentNo && !container)) return [];
     const status = normalizeStatus(cell(row, 16));
+    const mode = cell(row, 0);
     const folderUrl = INBOUND_DOCUMENT_LINKS[shipmentNo] ?? importsCellUrl(sourceRow, "B");
     const carrierKey = [cell(row, 0), cell(row, 4), cell(row, 5), cell(row, 10), shipmentNo]
       .filter(Boolean)
@@ -260,10 +274,112 @@ function inboundItems(table: any): ScheduleItem[] {
         mbl: cell(row, 4),
         hbl: cell(row, 5),
         invoice: cell(row, 3),
-        invoiceUrl: folderUrl,
+        invoiceUrl: invoiceFileUrl(splitValues(cell(row, 3))[0] ?? ""),
+        mode,
+        vessel: cell(row, 10),
+        pod: mode === "Ocean" ? "USLAX" : mode ? "LAX" : "",
+        eta,
       },
     ];
   });
+}
+
+function ImportSchedules({
+  items,
+  loading,
+}: {
+  items: ScheduleItem[];
+  loading: boolean;
+}) {
+  const sortedItems = [...items].sort((a, b) => a.date.getTime() - b.date.getTime());
+  const oceanCount = sortedItems.filter((item) => item.mode === "Ocean").length;
+  const airCount = sortedItems.filter((item) => item.mode === "Air").length;
+
+  const linkValue = (value: string, href?: string) =>
+    value ? (
+      href ? (
+        <a href={href} target="_blank" rel="noreferrer">
+          {value} <span aria-hidden="true">↗</span>
+        </a>
+      ) : (
+        value
+      )
+    ) : (
+      "—"
+    );
+
+  return (
+    <section className="import-schedules" aria-labelledby="import-schedules-heading">
+      <div className="panel-heading import-heading">
+        <div>
+          <p className="eyebrow">CURRENT + UPCOMING · OCEAN / AIR</p>
+          <h2 id="import-schedules-heading">Import Schedules</h2>
+        </div>
+        <div className="import-totals" aria-label="Import schedule totals">
+          <span><b>{oceanCount}</b> Ocean</span>
+          <span><b>{airCount}</b> Air</span>
+          <strong>{sortedItems.length}</strong>
+        </div>
+      </div>
+      <div className="import-table-wrap">
+        <table className="import-table">
+          <thead>
+            <tr>
+              <th>Mode</th>
+              <th>Shipment</th>
+              <th>Invoice</th>
+              <th>MBL</th>
+              <th>HBL</th>
+              <th>Container #</th>
+              <th>VSL</th>
+              <th>POD</th>
+              <th>ETA</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedItems.map((item) => (
+              <tr key={`import-${item.id}`}>
+                <td><span className={`mode-pill ${item.mode?.toLowerCase()}`}>{item.mode || "—"}</span></td>
+                <td>{linkValue(item.shipmentNo ?? item.title, item.shipmentUrl)}</td>
+                <td>
+                  <div className="multi-links">
+                    {splitValues(item.invoice ?? "").length
+                      ? splitValues(item.invoice ?? "").map((invoice) => (
+                          <a
+                            key={invoice}
+                            href={invoiceFileUrl(invoice)}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {invoice} <span aria-hidden="true">↗</span>
+                          </a>
+                        ))
+                      : "—"}
+                  </div>
+                </td>
+                <td>{item.mbl || "—"}</td>
+                <td>{item.hbl || "—"}</td>
+                <td>{linkValue(item.container ?? "", item.containerUrl)}</td>
+                <td>{item.vessel || "—"}</td>
+                <td>{item.pod || "—"}</td>
+                <td><time dateTime={dayKey(item.date)}>{item.eta || item.dateText || "—"}</time></td>
+              </tr>
+            ))}
+            {!loading && sortedItems.length === 0 && (
+              <tr>
+                <td className="import-empty" colSpan={9}>No current or upcoming imports match the active filters.</td>
+              </tr>
+            )}
+            {loading && (
+              <tr>
+                <td className="import-empty" colSpan={9}>Syncing import schedules…</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
 }
 
 function outboundItems(table: any): ScheduleItem[] {
@@ -653,6 +769,10 @@ export default function Home() {
         item.carrier,
         item.carrierReference,
         item.trackingNumber,
+        item.mode,
+        item.vessel,
+        item.pod,
+        item.eta,
       ]
         .join(" ")
         .toLowerCase()
@@ -668,6 +788,11 @@ export default function Home() {
   const outboundVisibleItems = useMemo(
     () => visibleItems.filter((item) => item.direction === "outbound"),
     [visibleItems],
+  );
+
+  const importScheduleItems = useMemo(
+    () => inboundVisibleItems.filter((item) => !finished.has(item.status.toLowerCase())),
+    [inboundVisibleItems],
   );
 
   const counts = useMemo(() => {
@@ -800,6 +925,8 @@ export default function Home() {
           Show finished
         </label>
       </section>
+
+      <ImportSchedules items={importScheduleItems} loading={loading} />
 
       <div className="schedule-stack" aria-label="Separate inbound and outbound schedules">
         <ScheduleBoard
