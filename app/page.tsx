@@ -832,20 +832,31 @@ function ScheduleCard({
 }
 
 function SmallParcelSchedule({
+  direction,
   items,
   loading,
 }: {
+  direction: Direction;
   items: ScheduleItem[];
   loading: boolean;
 }) {
   const sortedItems = [...items].sort((a, b) => a.date.getTime() - b.date.getTime());
+  const isInbound = direction === "inbound";
+  const headingId = `${direction}-small-parcel-heading`;
 
   return (
-    <section className="parcel-panel" aria-labelledby="small-parcel-heading">
+    <section
+      className={`parcel-panel ${direction}-parcel-panel`}
+      aria-labelledby={headingId}
+    >
       <div className="panel-heading parcel-heading">
         <div>
           <p className="eyebrow">UPS · FEDEX · USPS · DHL · AMAZON</p>
-          <h2 id="small-parcel-heading">Outbound Schedule (Small Parcels)</h2>
+          <h2 id={headingId}>
+            {isInbound
+              ? "Inbound Schedule (Small Parcels)"
+              : "Outbound Schedule (Small Parcels)"}
+          </h2>
         </div>
         <div className="parcel-total">
           <strong>{sortedItems.length}</strong>
@@ -886,7 +897,9 @@ function SmallParcelSchedule({
           );
         })}
         {!loading && sortedItems.length === 0 && (
-          <div className="parcel-empty">No small-parcel shipments in the active 14-day window.</div>
+          <div className="parcel-empty">
+            No {direction} small-parcel shipments in the active 14-day window.
+          </div>
         )}
         {loading && <div className="loading-card" />}
       </div>
@@ -1059,6 +1072,16 @@ export default function Home() {
   const inboundVisibleItems = useMemo(
     () => visibleItems.filter((item) => item.direction === "inbound"),
     [visibleItems],
+  );
+
+  const inboundScheduleVisibleItems = useMemo(
+    () => inboundVisibleItems.filter((item) => !item.isSmallParcel),
+    [inboundVisibleItems],
+  );
+
+  const inboundParcelVisibleItems = useMemo(
+    () => inboundVisibleItems.filter((item) => item.isSmallParcel),
+    [inboundVisibleItems],
   );
 
   const outboundVisibleItems = useMemo(
@@ -1234,10 +1257,15 @@ export default function Home() {
         <ScheduleBoard
           direction="inbound"
           days={days}
-          items={inboundVisibleItems}
+          items={inboundScheduleVisibleItems}
           loading={loading}
           savingId={savingId}
           onStatus={handleStatus}
+        />
+        <SmallParcelSchedule
+          direction="inbound"
+          items={inboundParcelVisibleItems}
+          loading={loading}
         />
         <ScheduleBoard
           direction="outbound"
@@ -1247,7 +1275,11 @@ export default function Home() {
           savingId={savingId}
           onStatus={handleStatus}
         />
-        <SmallParcelSchedule items={outboundParcelVisibleItems} loading={loading} />
+        <SmallParcelSchedule
+          direction="outbound"
+          items={outboundParcelVisibleItems}
+          loading={loading}
+        />
       </div>
 
       <footer>

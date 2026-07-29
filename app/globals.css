@@ -716,6 +716,9 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
   box-shadow: inset 0 4px 0 var(--source-ups-parcel);
 }
 
+.inbound-parcel-panel { box-shadow: inset 0 4px 0 var(--teal); }
+.outbound-parcel-panel { box-shadow: inset 0 4px 0 var(--orange); }
+
 .parcel-heading h2 {
   margin: 0;
   font: 800 27px/.95 "Saira Condensed", sans-serif;
