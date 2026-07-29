@@ -14,6 +14,7 @@ const WRITE_ENDPOINT =
   "https://script.google.com/a/macros/stylekoreanus.com/s/AKfycbwyVnU2jvOtMFXuY7KtX_8-hHXYVLrc6R2Dr_6akdDaTGQPc8duSo7tpguIuk00MjDl/exec";
 
 type Direction = "inbound" | "outbound";
+type OutboundDepartment = "Wholesale" | "B2B/E-Com" | "Nationals" | "MBX" | "NJ";
 
 type ScheduleItem = {
   id: string;
@@ -51,6 +52,7 @@ type ScheduleItem = {
   isSmallParcel?: boolean;
   shippingMethod?: string;
   sourceType?: string;
+  department?: OutboundDepartment;
 };
 
 type CostRecord = {
@@ -106,6 +108,14 @@ const SOURCE_LEGEND = [
   "UPS (Freight)",
   "FedEx (Freight)",
   "DHL (Freight)",
+];
+
+const DEPARTMENT_LEGEND: OutboundDepartment[] = [
+  "Wholesale",
+  "B2B/E-Com",
+  "Nationals",
+  "MBX",
+  "NJ",
 ];
 
 const STATUS_OPTIONS = [
@@ -279,14 +289,22 @@ function transferCostRecords(table: any) {
   });
 }
 
-function salesAmounts(table: any, source: "sales" | "national") {
+function stylekoreanInvoiceAmounts(table: any) {
   return (table.rows ?? []).flatMap((row: any) => {
-    const dateText =
-      source === "sales"
-        ? cell(row, 4) || cell(row, 0)
-        : cell(row, 9) || cell(row, 7) || cell(row, 8) || cell(row, 6);
+    // WMS Invoice and Issue → Stylekorean:
+    // Ship out Date (E), with Date (A) as fallback; INVOICE AMOUNT (G).
+    const dateText = cell(row, 4) || cell(row, 0);
     const date = parseDate(dateText);
-    const amount = parseMoney(cell(row, source === "sales" ? 6 : 4));
+    const amount = parseMoney(cell(row, 6));
+    return date && amount ? [{ date, amount }] : [];
+  });
+}
+
+function nationalOrderAmounts(table: any) {
+  return (table.rows ?? []).flatMap((row: any) => {
+    const dateText = cell(row, 9) || cell(row, 7) || cell(row, 8) || cell(row, 6);
+    const date = parseDate(dateText);
+    const amount = parseMoney(cell(row, 4));
     return date && amount ? [{ date, amount }] : [];
   });
 }
@@ -312,7 +330,13 @@ function buildKpis(
   const mtdCosts = ytdCosts.filter((record) => isMtd(record.date));
   const transferYtd = ytdCosts.filter((record) => record.isTransfer);
   const transferMtd = mtdCosts.filter((record) => record.isTransfer);
-  const salesRows = [...salesAmounts(sales, "sales"), ...salesAmounts(national, "national")];
+  // Sales includes every populated Stylekorean INVOICE AMOUNT plus National
+  // Total Order Amount. Source rows are independent of schedule visibility,
+  // completion state, filters, or hidden-row presentation.
+  const salesRows = [
+    ...stylekoreanInvoiceAmounts(sales),
+    ...nationalOrderAmounts(national),
+  ];
   const carrierCounts = ytdCosts.reduce((counts, record) => {
     if (!record.carrier) return counts;
     const key = record.carrier.toUpperCase();
@@ -469,6 +493,33 @@ function sourceClass(value: string) {
   if (normalized.includes("usps")) return "source-usps";
   if (normalized.includes("amazon")) return "source-amazon";
   return "source-wholesale";
+}
+
+function departmentClass(value?: OutboundDepartment) {
+  if (value === "B2B/E-Com") return "department-b2b-ecom";
+  if (value === "Nationals") return "department-nationals";
+  if (value === "MBX") return "department-mbx";
+  if (value === "NJ") return "department-nj";
+  return "department-wholesale";
+}
+
+function outboundDepartment(
+  values: string[],
+  fallback: OutboundDepartment,
+): OutboundDepartment {
+  const text = values.map(clean).filter(Boolean).join(" ").toUpperCase();
+  if (/\bMBX\b/.test(text)) return "MBX";
+  if (/\bNJ\b|\bNEW JERSEY\b/.test(text)) return "NJ";
+  if (
+    /\bNATIONALS?\b|\bULTA\b|\bROSS\b|\bTJX\b|\bMARSHALLS\b|\bBURLINGTON\b|\bIHERB\b|\bSEPHORA\b|\bOLIVE YOUNG\b/.test(
+      text,
+    )
+  ) {
+    return "Nationals";
+  }
+  if (/\bB2B\b|\bE-?COM\b|\bSTYLEKOREAN\b|\bWMS\b/.test(text)) return "B2B/E-Com";
+  if (/\bWHOLESALE\b/.test(text)) return "Wholesale";
+  return fallback;
 }
 
 function outboundSourceType(carrier: string, isSmallParcel: boolean) {
@@ -771,6 +822,7 @@ function outboundItems(table: any): ScheduleItem[] {
     const status = normalizeStatus(cell(row, 23) || cell(row, 20));
     const carrier = cell(row, 16);
     const carrierRefs = classifyOutboundReference(cell(row, 18));
+    const note = cell(row, 19);
     return [
       {
         id: `outbound-${sourceRow}`,
@@ -795,6 +847,7 @@ function outboundItems(table: any): ScheduleItem[] {
         shipDate,
         shippingMethod: "Trucking",
         sourceType: outboundSourceType(carrier, false),
+        department: outboundDepartment([note, customer], "Wholesale"),
       },
     ];
   });
@@ -813,6 +866,7 @@ function nationalOutboundItems(table: any): ScheduleItem[] {
     const sourceRow = index + 2;
     const order = cell(row, 3);
     const po = cell(row, 5);
+    const department = cell(row, 2);
     return [
       {
         id: `national-outbound-${sourceRow}`,
@@ -838,6 +892,7 @@ function nationalOutboundItems(table: any): ScheduleItem[] {
         shipDate: dateText,
         shippingMethod: "Trucking",
         sourceType: "Wholesale",
+        department: outboundDepartment([department, channel], "Nationals"),
       },
     ];
   });
@@ -899,6 +954,10 @@ function salesOutboundItems(table: any): ScheduleItem[] {
         isSmallParcel,
         shippingMethod: isTrucking ? "Trucking" : shippingMethod,
         sourceType: outboundSourceType(carrier || shippingMethod, isSmallParcel),
+        department: outboundDepartment(
+          [customer, cell(row, 3), cell(row, 11), cell(row, 12)],
+          "B2B/E-Com",
+        ),
       },
     ];
   });
@@ -992,7 +1051,11 @@ function ScheduleCard({
   const secondary = sanitizeSecondary(item.secondary);
 
   return (
-    <details className={`schedule-card ${item.direction} ${sourceClass(item.sourceType ?? "")}`}>
+    <details
+      className={`schedule-card ${item.direction} ${sourceClass(item.sourceType ?? "")} ${
+        item.direction === "outbound" ? departmentClass(item.department) : ""
+      }`}
+    >
       <summary className="card-summary">
         <span className="summary-primary">
           <small>{item.isSmallParcel ? "TRACKING" : item.direction === "inbound" ? "SHIPMENT" : "CUSTOMER"}</small>
@@ -1011,9 +1074,14 @@ function ScheduleCard({
 
       <div className="card-detail">
         <div className="card-topline">
-          <span className="direction-label source-badge">
-            {item.sourceType || (item.direction === "inbound" ? "Inbound" : "Wholesale")}
-          </span>
+          <div className="card-badges">
+            {item.direction === "outbound" ? (
+              <span className="department-badge">{item.department ?? "Wholesale"}</span>
+            ) : null}
+            <span className="direction-label source-badge">
+              {item.sourceType || (item.direction === "inbound" ? "Inbound" : "Wholesale")}
+            </span>
+          </div>
           <span className={statusClass(item.status)}>{item.status}</span>
         </div>
         {item.direction === "inbound" ? (
@@ -1124,11 +1192,18 @@ function SmallParcelSchedule({
           const tracking = item.trackingNumber || item.pro || "";
           return (
             <details
-              className={`parcel-card ${sourceClass(item.sourceType ?? "")}`}
+              className={`parcel-card ${sourceClass(item.sourceType ?? "")} ${
+                direction === "outbound" ? departmentClass(item.department) : ""
+              }`}
               key={`parcel-${item.id}`}
             >
               <summary className="parcel-summary">
-                <span className="source-badge">{item.sourceType || item.carrier || "Parcel"}</span>
+                <span className="parcel-badges">
+                  {direction === "outbound" ? (
+                    <span className="department-badge">{item.department ?? "B2B/E-Com"}</span>
+                  ) : null}
+                  <span className="source-badge">{item.sourceType || item.carrier || "Parcel"}</span>
+                </span>
                 <strong className="parcel-tracking">{tracking || "Tracking pending"}</strong>
                 <span className="parcel-invoice">{item.invoice ? `Invoice # ${item.invoice}` : "Invoice # —"}</span>
                 <span className="expand-mark" aria-hidden="true">＋</span>
@@ -1350,6 +1425,9 @@ export default function Home() {
         item.vessel,
         item.pod,
         item.eta,
+        item.shippingMethod,
+        item.sourceType,
+        item.department,
       ]
         .join(" ")
         .toLowerCase()
@@ -1524,7 +1602,7 @@ export default function Home() {
             <div><small>YTD</small><strong>{money(kpis.transfersYtd)}</strong></div>
           </article>
           <article className="kpi-card">
-            <span>SALES AMOUNTS</span>
+            <span>SALES · WMS INVOICE + NATIONAL ORDER</span>
             <div><small>MTD</small><strong>{money(kpis.salesMtd)}</strong></div>
             <div><small>YTD</small><strong>{money(kpis.salesYtd)}</strong></div>
           </article>
@@ -1548,9 +1626,9 @@ export default function Home() {
         <p className="kpi-method">
           All rows, including hidden/completed entries. Shipping costs use freight Invoice first,
           then Rate when Invoice is blank—never shipment Invoice Amount. Sales use outbound
-          Shipment Value / Invoice Value / Invoice Total / Invoice Amount. MTD is the current
-          month; YTD begins Jan 1, 2026. Trucking averages exclude transfers and unclassified
-          destinations; local is within 50 miles of Buena Park.
+          National Total Order Amount plus every Stylekorean INVOICE AMOUNT (column G). MTD is
+          the current month; YTD begins Jan 1, 2026. Trucking averages exclude transfers and
+          unclassified destinations; local is within 50 miles of Buena Park.
         </p>
       </section>
 
@@ -1575,12 +1653,24 @@ export default function Home() {
       </section>
 
       <section className="source-legend" aria-label="Entry source colors">
-        <strong>Source colors</strong>
+        <strong>Mode & carrier colors</strong>
         <div>
           {SOURCE_LEGEND.map((source) => (
             <span className={sourceClass(source)} key={source}>
               <i aria-hidden="true" />
               {source}
+            </span>
+          ))}
+        </div>
+      </section>
+
+      <section className="source-legend department-legend" aria-label="Outbound department colors">
+        <strong>Outbound departments</strong>
+        <div>
+          {DEPARTMENT_LEGEND.map((department) => (
+            <span className={departmentClass(department)} key={department}>
+              <i aria-hidden="true" />
+              {department}
             </span>
           ))}
         </div>

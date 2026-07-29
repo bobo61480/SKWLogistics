@@ -56,5 +56,10 @@ test("keeps the requested schedule order and KPI controls", async () => {
   assert.match(source, /!record\.isTransfer/);
   assert.match(source, /parseFreightCost/);
   assert.match(source, /amount <= 250_000/);
+  assert.match(source, /stylekoreanInvoiceAmounts/);
+  assert.match(source, /INVOICE AMOUNT \(column G\)/);
+  assert.match(source, /Outbound departments/);
+  assert.match(source, /B2B\/E-Com/);
+  assert.match(source, /departmentClass/);
   assert.doesNotMatch(source, /\.\.\.truckingCostRecords\(currentOutbound/);
 });

@@ -25,6 +25,11 @@
   --source-ups-freight: #9a6635;
   --source-fedex-freight: #8a58c2;
   --source-dhl-freight: #ad8411;
+  --department-wholesale: #7656a8;
+  --department-b2b-ecom: #d45f2a;
+  --department-nationals: #087f8c;
+  --department-mbx: #3769c8;
+  --department-nj: #2f7d55;
 }
 
 * { box-sizing: border-box; }
@@ -346,6 +351,8 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
   background: var(--source-color, var(--source-wholesale));
 }
 
+.department-legend i { background: var(--department-color, var(--department-wholesale)); }
+
 .search {
   display: flex;
   align-items: center;
@@ -501,6 +508,11 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
 .source-ups-freight { --source-color: var(--source-ups-freight); }
 .source-fedex-freight { --source-color: var(--source-fedex-freight); }
 .source-dhl-freight { --source-color: var(--source-dhl-freight); }
+.department-wholesale { --department-color: var(--department-wholesale); }
+.department-b2b-ecom { --department-color: var(--department-b2b-ecom); }
+.department-nationals { --department-color: var(--department-nationals); }
+.department-mbx { --department-color: var(--department-mbx); }
+.department-nj { --department-color: var(--department-nj); }
 .import-empty {
   height: 76px;
   color: var(--muted) !important;
@@ -603,7 +615,9 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
   box-shadow: 0 2px 6px rgba(22, 39, 43, .04);
 }
 
-.schedule-card.outbound { border-left-color: var(--source-color, var(--orange)); }
+.schedule-card.outbound {
+  border-left-color: var(--department-color, var(--source-color, var(--orange)));
+}
 .schedule-card > summary { list-style: none; }
 .schedule-card > summary::-webkit-details-marker { display: none; }
 
@@ -677,8 +691,31 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
 }
 
 .card-topline { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.card-badges,
+.parcel-badges {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
 .direction-label { color: var(--teal); font: 800 9px "IBM Plex Mono", monospace; letter-spacing: .08em; }
 .outbound .direction-label { color: var(--orange); }
+.department-badge {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 150px;
+  align-items: center;
+  overflow: hidden;
+  padding: 3px 6px;
+  border-radius: 3px;
+  background: var(--department-color, var(--department-wholesale));
+  color: #fff;
+  font: 800 8px "IBM Plex Mono", monospace;
+  letter-spacing: .04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .source-badge {
   display: inline-flex;
   width: fit-content;
@@ -856,6 +893,10 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
   border-top: 3px solid var(--source-color, var(--source-wholesale));
   border-radius: 5px;
   background: #fbfbfa;
+}
+
+.outbound-parcel-panel .parcel-card {
+  border-top-color: var(--department-color, var(--source-color, var(--source-wholesale)));
 }
 
 .parcel-card > summary { list-style: none; }
@@ -1287,6 +1328,14 @@ body {
   box-shadow: none;
 }
 
+.schedule-card.outbound {
+  background: color-mix(
+    in srgb,
+    var(--department-color, var(--source-color, var(--orange))) 8%,
+    white
+  );
+}
+
 .schedule-card:hover {
   border-color: #9fb2ba;
   transform: translateY(-1px);
@@ -1301,6 +1350,17 @@ body {
       rgba(255, 255, 255, .12) 5px 7px
     ),
     var(--source-color, var(--source-wholesale));
+}
+
+.department-badge {
+  border-radius: 5px;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 5px,
+      rgba(255, 255, 255, .12) 5px 7px
+    ),
+    var(--department-color, var(--department-wholesale));
 }
 
 .status { min-height: 24px; padding-inline: 9px; }
@@ -1318,6 +1378,14 @@ body {
   border-top-width: 4px;
   border-radius: 12px;
   background: #fbfcfc;
+}
+
+.outbound-parcel-panel .parcel-card {
+  background: color-mix(
+    in srgb,
+    var(--department-color, var(--source-color, var(--source-wholesale))) 7%,
+    white
+  );
 }
 
 .parcel-card:hover {
