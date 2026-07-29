@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { INBOUND_DOCUMENT_LINKS } from "./inbound-links";
 
 const SHEET_ID = "1M-vZ24Yw4ZN7R7b_473cVn8kny8DznTakSsD3VQsCzc";
 const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`;
@@ -27,12 +28,20 @@ type ScheduleItem = {
   sourceUrl?: string;
   editable?: boolean;
   customer?: string;
+  customerNo?: string;
+  po?: string;
   invoice?: string;
   shipmentNo?: string;
+  shipmentUrl?: string;
+  invoiceUrl?: string;
   container?: string;
+  containerUrl?: string;
   mbl?: string;
   hbl?: string;
   pro?: string;
+  carrier?: string;
+  carrierReference?: string;
+  trackingNumber?: string;
   shipDate?: string;
 };
 
@@ -122,6 +131,73 @@ function statusClass(status: string) {
   return "status";
 }
 
+function importsCellUrl(row: number, column: string) {
+  return `${SHEET_URL}?gid=1497250700&range=${column}${row}#gid=1497250700&range=${column}${row}`;
+}
+
+function sourceRowUrl(item: ScheduleItem) {
+  if (item.direction === "inbound") return importsCellUrl(item.sourceRow, "A");
+  if (item.sourceSheet === "Outbound Shipping Schedule") {
+    return `${SHEET_URL}?gid=20260708&range=A${item.sourceRow}#gid=20260708&range=A${item.sourceRow}`;
+  }
+  if (item.sourceSheet === "NATIONAL ORDER PROGRESS") {
+    return `https://docs.google.com/spreadsheets/d/${NATIONAL_SHEET_ID}/edit?gid=99300389&range=A${item.sourceRow}#gid=99300389&range=A${item.sourceRow}`;
+  }
+  if (item.sourceSheet === "Stylekorean") {
+    return `https://docs.google.com/spreadsheets/d/${SALES_SHEET_ID}/edit?gid=0&range=A${item.sourceRow}#gid=0&range=A${item.sourceRow}`;
+  }
+  return item.sourceUrl ?? SHEET_URL;
+}
+
+function officialTrackingUrl(container: string, carrierKey: string, fallback: string) {
+  const value = clean(container).replace(/\s+/g, "").toUpperCase();
+  const carrier = clean(carrierKey).toUpperCase();
+  if (!value) return "";
+  if (/^1Z/.test(value)) return `https://www.ups.com/track?loc=en_US&tracknum=${encodeURIComponent(value)}`;
+  if (/^(94|92|93)/.test(value)) {
+    return `https://tools.usps.com/go/TrackConfirmAction?tLabels=${encodeURIComponent(value)}`;
+  }
+  if (/^(JD|JJD)/.test(value)) {
+    return `https://www.dhl.com/us-en/home/tracking/tracking-express.html?submit=1&tracking-id=${encodeURIComponent(value)}`;
+  }
+  if (/FEDEX|FDX/.test(carrier)) {
+    return `https://www.fedex.com/fedextrack/?trknbr=${encodeURIComponent(value)}`;
+  }
+  if (/^(SMCU)|SMLM|SM LINES?/.test(`${value} ${carrier}`)) {
+    return `https://esvc.smlines.com/smline/CUP_HOM_3301GS.do?_search=false&f_cmd=121&page=1&rows=10000&search_name=${encodeURIComponent(value)}&search_type=C&sidx=&sord=asc`;
+  }
+  if (/^(HDMU)|(^| )HMM( |$)/.test(`${value} ${carrier}`)) {
+    return "https://www.hmm21.com/e-service/general/trackNTrace/TrackNTrace.do";
+  }
+  if (/^(MAEU|MRSU|MSKU)|MAERSK/.test(`${value} ${carrier}`)) {
+    return `https://www.maersk.com/tracking/${encodeURIComponent(value)}`;
+  }
+  if (/^(KMTU|KORP)|KMTC/.test(`${value} ${carrier}`)) return "https://www.ekmtc.com/index.html";
+  if (/^(PUSM)|(^| )ONE( |$)/.test(`${value} ${carrier}`)) {
+    return `https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?ctrack-field=${encodeURIComponent(value)}&trakNoParam=${encodeURIComponent(value)}`;
+  }
+  if (/^(COSU|CSLU)/.test(value)) {
+    return `https://elines.coscoshipping.com/ebusiness/cargotracking?trackingType=CONTAINER&number=${encodeURIComponent(value)}`;
+  }
+  return fallback;
+}
+
+function splitValues(value: string) {
+  return clean(value)
+    .split(/\r?\n|,\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function classifyOutboundReference(value: string) {
+  const text = clean(value);
+  if (!text) return { carrierReference: "", trackingNumber: "" };
+  if (/booking|pickup|pick-up|load|bol|bold/i.test(text)) {
+    return { carrierReference: text, trackingNumber: "" };
+  }
+  return { carrierReference: "", trackingNumber: text };
+}
+
 async function fetchTable(
   spreadsheetId: string,
   gid: number,
@@ -159,6 +235,10 @@ function inboundItems(table: any): ScheduleItem[] {
     const container = cell(row, 6);
     if (!date || !sourceRow || (!shipmentNo && !container)) return [];
     const status = normalizeStatus(cell(row, 16));
+    const folderUrl = INBOUND_DOCUMENT_LINKS[shipmentNo] ?? importsCellUrl(sourceRow, "B");
+    const carrierKey = [cell(row, 0), cell(row, 4), cell(row, 5), cell(row, 10), shipmentNo]
+      .filter(Boolean)
+      .join(" ");
     return [
       {
         id: `inbound-${sourceRow}-${index}`,
@@ -174,10 +254,13 @@ function inboundItems(table: any): ScheduleItem[] {
         sourceUrl: SHEET_URL,
         editable: true,
         shipmentNo,
+        shipmentUrl: folderUrl,
         container,
+        containerUrl: officialTrackingUrl(container, carrierKey, importsCellUrl(sourceRow, "H")),
         mbl: cell(row, 4),
         hbl: cell(row, 5),
         invoice: cell(row, 3),
+        invoiceUrl: folderUrl,
       },
     ];
   });
@@ -193,6 +276,8 @@ function outboundItems(table: any): ScheduleItem[] {
     const date = parseDate(shipDate);
     if (!date || !customer) return [];
     const status = normalizeStatus(cell(row, 23) || cell(row, 20));
+    const carrier = cell(row, 16);
+    const carrierRefs = classifyOutboundReference(cell(row, 18));
     return [
       {
         id: `outbound-${sourceRow}`,
@@ -208,8 +293,12 @@ function outboundItems(table: any): ScheduleItem[] {
         sourceUrl: SHEET_URL,
         editable: true,
         customer,
+        customerNo: customer,
         invoice,
-        pro: cell(row, 18),
+        pro: carrierRefs.trackingNumber,
+        carrier,
+        carrierReference: carrierRefs.carrierReference || cell(row, 19),
+        trackingNumber: carrierRefs.trackingNumber,
         shipDate,
       },
     ];
@@ -245,7 +334,11 @@ function nationalOutboundItems(table: any): ScheduleItem[] {
         sourceUrl: NATIONAL_SHEET_URL,
         editable: false,
         customer: channel,
-        invoice: order || po,
+        customerNo: channel,
+        po,
+        invoice: order,
+        carrier: cell(row, 11),
+        carrierReference: cell(row, 10),
         shipDate: dateText,
       },
     ];
@@ -278,7 +371,9 @@ function salesOutboundItems(table: any): ScheduleItem[] {
         sourceUrl: SALES_SHEET_URL,
         editable: false,
         customer,
+        customerNo: customer,
         invoice: cell(row, 1),
+        carrier: cell(row, 5),
         shipDate,
       },
     ];
@@ -334,40 +429,75 @@ function ScheduleCard({
   onStatus: (item: ScheduleItem, status: string) => void;
 }) {
   const options = item.direction === "inbound" ? INBOUND_STATUS_OPTIONS : STATUS_OPTIONS;
+  const sourceCellUrl = sourceRowUrl(item);
+  const valueLink = (label: string, value: string, href?: string) => (
+    <div className="data-field">
+      <dt>{label}</dt>
+      <dd>
+        {href ? (
+          <a href={href} target="_blank" rel="noreferrer">
+            {value} <span aria-hidden="true">↗</span>
+          </a>
+        ) : (
+          value || "—"
+        )}
+      </dd>
+    </div>
+  );
   return (
     <article className={`schedule-card ${item.direction}`}>
       <div className="card-topline">
         <span className="direction-label">{item.direction === "inbound" ? "IN" : "OUT"}</span>
         <span className={statusClass(item.status)}>{item.status}</span>
       </div>
-      <h3>{item.title}</h3>
-      <p className="reference">{item.reference}</p>
-      <p className="secondary">{item.secondary || item.sourceSheet}</p>
-      {item.editable ? (
-        <label className="status-field">
-          <span>Update source status</span>
-          <select
-            aria-label={`Update ${item.title} status`}
-            disabled={saving}
-            value={options.includes(item.status) ? item.status : "Scheduled"}
-            onChange={(event) => onStatus(item, event.target.value)}
-          >
-            {options.map((option) => (
-              <option key={option}>{option}</option>
-            ))}
-          </select>
-        </label>
+      {item.direction === "inbound" ? (
+        <dl className="data-grid inbound-data">
+          {valueLink("Shipment", item.shipmentNo ?? item.title, item.shipmentUrl)}
+          {valueLink(
+            "Invoice #",
+            splitValues(item.invoice ?? "").join(" · "),
+            item.invoiceUrl,
+          )}
+          {valueLink("Container #", item.container ?? "", item.containerUrl)}
+        </dl>
       ) : (
+        <dl className="data-grid outbound-data">
+          {valueLink("Customer #", item.customerNo ?? item.customer ?? item.title)}
+          {valueLink("PO # / Invoice #", [item.po, item.invoice].filter(Boolean).join(" · "))}
+          {valueLink("Carrier", item.carrier ?? "")}
+          {valueLink("Booking / Pickup / Load / BOL #", item.carrierReference ?? "")}
+          {valueLink("Tracking # / PRO #", item.trackingNumber ?? item.pro ?? "")}
+        </dl>
+      )}
+      <p className="secondary">{item.secondary || item.sourceSheet}</p>
+      <div className="card-actions">
+        {item.editable ? (
+          <label className="status-field">
+            <span>Status</span>
+            <select
+              aria-label={`Update ${item.title} status`}
+              disabled={saving}
+              value={options.includes(item.status) ? item.status : "Scheduled"}
+              onChange={(event) => onStatus(item, event.target.value)}
+            >
+              {options.map((option) => (
+                <option key={option}>{option}</option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <span className="read-only-label">READ ONLY</span>
+        )}
         <a
           className="source-link"
-          href={item.sourceUrl}
+          href={sourceCellUrl}
           target="_blank"
           rel="noreferrer"
           aria-label={`Open ${item.sourceSheet} source row`}
         >
-          {item.sourceSheet} · ROW {item.sourceRow} ↗
+          SOURCE · ROW {item.sourceRow} ↗
         </a>
-      )}
+      </div>
     </article>
   );
 }
@@ -395,9 +525,7 @@ function ScheduleBoard({
     >
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">
-            {isInbound ? "TOP BOARD · ARRIVALS" : "BOTTOM BOARD · DEPARTURES"}
-          </p>
+          <p className="eyebrow">{isInbound ? "ARRIVALS" : "DEPARTURES"}</p>
           <h2 id={`${direction}-schedule-heading`}>
             {isInbound ? "Inbound schedule" : "Outbound schedule"}
           </h2>
@@ -405,7 +533,7 @@ function ScheduleBoard({
         <div className={`board-total ${direction}`}>
           <span>{isInbound ? "INBOUND" : "OUTBOUND"}</span>
           <strong>{items.length}</strong>
-          <small>moves · next 14 days</small>
+          <small>next 14 days</small>
         </div>
       </div>
       <div className="board-wrap">
@@ -511,7 +639,21 @@ export default function Home() {
       if (stamp < first || stamp > last) return false;
       if (!includeFinished && finished.has(item.status.toLowerCase())) return false;
       if (!needle) return true;
-      return [item.title, item.reference, item.secondary, item.status, item.sourceSheet]
+      return [
+        item.title,
+        item.reference,
+        item.secondary,
+        item.status,
+        item.sourceSheet,
+        item.customerNo,
+        item.po,
+        item.invoice,
+        item.shipmentNo,
+        item.container,
+        item.carrier,
+        item.carrierReference,
+        item.trackingNumber,
+      ]
         .join(" ")
         .toLowerCase()
         .includes(needle);
@@ -572,15 +714,13 @@ export default function Home() {
         </div>
         <div className="manifest-main">
           <div>
-            <p className="eyebrow">LOGISTICS MASTER 2026 · LIVE TWO-WEEK FORECAST</p>
+            <p className="eyebrow">LOGISTICS MASTER 2026 · LIVE 14-DAY FORECAST</p>
             <h1>
-              Inbound <em>+</em> Outbound
-              <br />
-              Schedule Control
+              Inbound <em>+</em> Outbound Schedule
             </h1>
             <p className="intro">
-              One rolling 14-day operating view for containers, air freight, and outbound
-              customer shipments—with approved status changes written back to Google Sheets.
+              Compact live view for inbound documents and container tracking, plus outbound
+              customer, carrier, booking, and PRO references.
             </p>
           </div>
           <div className="manifest-actions">
