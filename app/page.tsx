@@ -149,8 +149,48 @@ function clean(value: unknown) {
 }
 
 function cell(row: any, index: number) {
+  if (Array.isArray(row)) return clean(row[index]);
   const value = row?.c?.[index];
   return clean(value?.f ?? value?.v ?? "");
+}
+
+function parseCsv(text: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let value = "";
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (quoted) {
+      if (character === '"' && text[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else if (character === '"') {
+        quoted = false;
+      } else {
+        value += character;
+      }
+    } else if (character === '"') {
+      quoted = true;
+    } else if (character === ",") {
+      row.push(value);
+      value = "";
+    } else if (character === "\n") {
+      row.push(value.replace(/\r$/, ""));
+      rows.push(row);
+      row = [];
+      value = "";
+    } else {
+      value += character;
+    }
+  }
+
+  if (value || row.length) {
+    row.push(value.replace(/\r$/, ""));
+    rows.push(row);
+  }
+  return rows;
 }
 
 function parseGviz(text: string) {
@@ -587,6 +627,15 @@ async function fetchTable(
   return parseGviz(await response.text());
 }
 
+async function fetchCsvRows(spreadsheetId: string, gid: number) {
+  const url = new URL(`https://docs.google.com/spreadsheets/d/${spreadsheetId}/export`);
+  url.searchParams.set("format", "csv");
+  url.searchParams.set("gid", String(gid));
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Workbook read failed (${response.status}).`);
+  return parseCsv(await response.text());
+}
+
 function normalizeStatus(value: string) {
   const normalized = clean(value).toLowerCase();
   if (!normalized) return "Scheduled";
@@ -608,9 +657,10 @@ type ImportSourceRecord = {
   status: string;
 };
 
-function importSourceRecords(table: any): ImportSourceRecord[] {
-  return (table.rows ?? []).flatMap((row: any, index: number) => {
-    const sourceRow = index + 2;
+function importSourceRecords(rows: string[][]): ImportSourceRecord[] {
+  return rows.flatMap((row, index) => {
+    const sourceRow = index + 1;
+    if (sourceRow <= 2) return [];
     const shipmentNo = cell(row, 0);
     const invoice = cell(row, 2);
     const mbl = cell(row, 3);
@@ -647,13 +697,19 @@ function resolveImportSource(
   const mblKey = normalizedIdentifier(mbl);
   const hblKey = normalizedIdentifier(hbl);
 
-  return (
-    records.find(
-      (record) =>
-        shipmentKey &&
-        normalizedIdentifier(record.shipmentNo) === shipmentKey,
-    ) ??
-    records.find((record) => {
+  const uniqueMatch = (matches: ImportSourceRecord[]) =>
+    matches.length === 1 ? matches[0] : null;
+  if (shipmentKey) {
+    const shipmentMatch = uniqueMatch(
+      records.filter(
+        (record) => normalizedIdentifier(record.shipmentNo) === shipmentKey,
+      ),
+    );
+    if (shipmentMatch) return shipmentMatch;
+  }
+
+  return uniqueMatch(
+    records.filter((record) => {
       const recordInvoices = splitValues(record.invoice).map(normalizedIdentifier);
       const invoiceMatch =
         invoiceKeys.length > 0 &&
@@ -661,8 +717,7 @@ function resolveImportSource(
       const mblMatch = mblKey && normalizedIdentifier(record.mbl) === mblKey;
       const hblMatch = hblKey && normalizedIdentifier(record.hbl) === hblKey;
       return invoiceMatch && (mblMatch || hblMatch);
-    }) ??
-    null
+    }),
   );
 }
 
@@ -689,8 +744,8 @@ function resolvedInboundMode(
   return /\bOCEAN\b/i.test(reportedMode) ? "Ocean" : clean(reportedMode) || "Ocean";
 }
 
-function inboundItems(table: any, importsTable: any): ScheduleItem[] {
-  const imports = importSourceRecords(importsTable);
+function inboundItems(table: any, importsRows: string[][]): ScheduleItem[] {
+  const imports = importSourceRecords(importsRows);
   return (table.rows ?? []).flatMap((row: any, index: number) => {
     const eta = cell(row, 12);
     const expectedDelivery = cell(row, 14);
@@ -705,7 +760,7 @@ function inboundItems(table: any, importsTable: any): ScheduleItem[] {
       mbl,
       hbl,
     );
-    const importsSourceRow = importSource?.sourceRow ?? Number(cell(row, 17));
+    const importsSourceRow = importSource?.sourceRow;
     const container = cell(row, 6) || importSource?.container || "";
     const reportedMode = cell(row, 0);
     const vessel = cell(row, 10) || importSource?.vessel || "";
@@ -899,9 +954,63 @@ function ImportSchedules({
   );
 }
 
-function outboundItems(table: any): ScheduleItem[] {
-  return (table.rows ?? []).flatMap((row: any, index: number) => {
-    const sourceRow = index + 2;
+type OutboundSourceRecord = {
+  sourceRow: number;
+  customer: string;
+  invoice: string;
+  shipDate: string;
+  pro: string;
+};
+
+function outboundSourceRecords(rows: string[][]): OutboundSourceRecord[] {
+  return rows.flatMap((row, index) => {
+    const sourceRow = index + 1;
+    if (sourceRow < 4) return [];
+    const customer = cell(row, 0);
+    const invoice = cell(row, 1);
+    const shipDate = cell(row, 3);
+    if (!customer || !shipDate) return [];
+    return [{
+      sourceRow,
+      customer,
+      invoice,
+      shipDate,
+      pro: cell(row, 18),
+    }];
+  });
+}
+
+function resolveOutboundSource(records: OutboundSourceRecord[], item: ScheduleItem) {
+  const uniqueMatch = (matches: OutboundSourceRecord[]) =>
+    matches.length === 1 ? matches[0] : null;
+  const proKey = normalizedIdentifier(item.pro || item.carrierReference || "");
+  if (proKey) {
+    const proMatch = uniqueMatch(
+      records.filter((record) => normalizedIdentifier(record.pro) === proKey),
+    );
+    if (proMatch) return proMatch;
+  }
+
+  const customerKey = normalizedIdentifier(item.customer || item.customerNo || "");
+  const invoiceKeys = splitValues(item.invoice || "").map(normalizedIdentifier).filter(Boolean);
+  const shipDateKey = normalizedIdentifier(item.shipDate || "");
+  return uniqueMatch(
+    records.filter((record) => {
+      const recordInvoices = splitValues(record.invoice).map(normalizedIdentifier);
+      return (
+        customerKey &&
+        normalizedIdentifier(record.customer) === customerKey &&
+        shipDateKey &&
+        normalizedIdentifier(record.shipDate) === shipDateKey &&
+        invoiceKeys.some((invoice) => recordInvoices.includes(invoice))
+      );
+    }),
+  );
+}
+
+function outboundItems(rows: string[][]): ScheduleItem[] {
+  return rows.flatMap((row, index) => {
+    const sourceRow = index + 1;
     if (sourceRow < 4) return [];
     const customer = cell(row, 0);
     const invoice = cell(row, 1);
@@ -1053,10 +1162,33 @@ function salesOutboundItems(table: any): ScheduleItem[] {
 }
 
 async function postStatus(item: ScheduleItem, status: string) {
+  let sourceRow = item.sourceRow;
+  if (item.sourceSheet === "IMPORTS") {
+    const imports = importSourceRecords(await fetchCsvRows(SHEET_ID, 1497250700));
+    const source = resolveImportSource(
+      imports,
+      item.shipmentNo ?? "",
+      item.invoice ?? "",
+      item.mbl ?? "",
+      item.hbl ?? "",
+    );
+    if (!source) {
+      throw new Error("The IMPORTS sheet did not contain one unique matching shipment row.");
+    }
+    sourceRow = source.sourceRow;
+  } else if (item.sourceSheet === "Outbound Shipping Schedule") {
+    const outbound = outboundSourceRecords(await fetchCsvRows(SHEET_ID, 20260708));
+    const source = resolveOutboundSource(outbound, item);
+    if (!source) {
+      throw new Error("The outbound sheet did not contain one unique matching shipment row.");
+    }
+    sourceRow = source.sourceRow;
+  }
+
   const payload = {
     kind: item.direction,
     sourceSheet: item.sourceSheet,
-    sourceRow: item.sourceRow,
+    sourceRow,
     shipmentNo: item.shipmentNo ?? "",
     container: item.container ?? "",
     mbl: item.mbl ?? "",
@@ -1079,6 +1211,9 @@ async function postStatus(item: ScheduleItem, status: string) {
     if (response.ok) {
       const result = await response.json().catch(() => ({ ok: true }));
       if (result?.ok === false) throw new Error(result.error || "The update was rejected.");
+      if (result?.row && Number(result.row) !== sourceRow) {
+        throw new Error("The update was rejected because the confirmed source row changed.");
+      }
       submitted = true;
     }
   } catch (error) {
@@ -1103,7 +1238,7 @@ async function postStatus(item: ScheduleItem, status: string) {
         const table = await fetchTable(
           SHEET_ID,
           1497250700,
-          `AD${item.sourceRow}:AD${item.sourceRow}`,
+          `AD${sourceRow}:AD${sourceRow}`,
           0,
         );
         persisted = cell(table.rows?.[0], 0);
@@ -1111,7 +1246,7 @@ async function postStatus(item: ScheduleItem, status: string) {
         const table = await fetchTable(
           SHEET_ID,
           20260708,
-          `U${item.sourceRow}:X${item.sourceRow}`,
+          `U${sourceRow}:X${sourceRow}`,
           0,
         );
         persisted = cell(table.rows?.[0], 3) || cell(table.rows?.[0], 0);
@@ -1501,8 +1636,8 @@ export default function Home() {
         transfers,
       ] = await Promise.all([
         fetchTable(SHEET_ID, 2026070701, "A3:S1200", 1),
-        fetchTable(SHEET_ID, 1497250700, "A1:AF1200", 1),
-        fetchTable(SHEET_ID, 20260708, "A2:X1000", 0),
+        fetchCsvRows(SHEET_ID, 1497250700),
+        fetchCsvRows(SHEET_ID, 20260708),
         fetchTable(NATIONAL_SHEET_ID, 99300389, "A1:U3500", 1),
         fetchTable(SALES_SHEET_ID, 0, "A2:AF4200", 1),
         fetchTable(SHEET_ID, 852802817, "A2:X1609", 1),

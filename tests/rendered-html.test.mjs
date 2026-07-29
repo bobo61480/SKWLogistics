@@ -69,3 +69,15 @@ test("keeps the requested schedule order and KPI controls", async () => {
   assert.match(source, /departmentClass/);
   assert.doesNotMatch(source, /\.\.\.truckingCostRecords\(currentOutbound/);
 });
+
+test("preserves physical Google Sheet rows for every editable write-back", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /function parseCsv\(/);
+  assert.match(source, /fetchCsvRows\(SHEET_ID, 1497250700\)/);
+  assert.match(source, /fetchCsvRows\(SHEET_ID, 20260708\)/);
+  assert.match(source, /const sourceRow = index \+ 1/);
+  assert.match(source, /did not contain one unique matching shipment row/);
+  assert.doesNotMatch(source, /Number\(cell\(row, 17\)\)/);
+  assert.doesNotMatch(source, /fetchTable\(SHEET_ID, 1497250700, "A1:AF1200", 1\)/);
+  assert.doesNotMatch(source, /fetchTable\(SHEET_ID, 20260708, "A2:X1000", 0\)/);
+});
