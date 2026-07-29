@@ -53,6 +53,47 @@ type ScheduleItem = {
   sourceType?: string;
 };
 
+type CostRecord = {
+  date: Date;
+  cost: number;
+  carrier: string;
+  destination: string;
+  loadType: "LTL" | "FTL";
+  isTransfer: boolean;
+};
+
+type KpiSnapshot = {
+  shippingMtd: number;
+  shippingYtd: number;
+  transfersMtd: number;
+  transfersYtd: number;
+  salesMtd: number;
+  salesYtd: number;
+  topCarrier: string;
+  topCarrierMoves: number;
+  ltlPercent: number;
+  ftlPercent: number;
+  avgLocal: number;
+  avgCalifornia: number;
+  avgOutOfState: number;
+};
+
+const EMPTY_KPIS: KpiSnapshot = {
+  shippingMtd: 0,
+  shippingYtd: 0,
+  transfersMtd: 0,
+  transfersYtd: 0,
+  salesMtd: 0,
+  salesYtd: 0,
+  topCarrier: "—",
+  topCarrierMoves: 0,
+  ltlPercent: 0,
+  ftlPercent: 0,
+  avgLocal: 0,
+  avgCalifornia: 0,
+  avgOutOfState: 0,
+};
+
 const SOURCE_LEGEND = [
   "Wholesale",
   "Ocean",
@@ -126,6 +167,186 @@ function parseDate(value: string) {
       ? candidate
       : best,
   );
+}
+
+function parseMoney(value: string) {
+  const text = clean(value).toUpperCase();
+  if (!text || /^(N\/?A|NONE|PENDING|WAIVED|-)$/.test(text)) return 0;
+  const match = text.replace(/[$,\s]/g, "").match(/-?\d+(?:\.\d+)?(?:[KMB])?/);
+  if (!match) return 0;
+  const suffix = match[0].slice(-1);
+  const multiplier = suffix === "K" ? 1_000 : suffix === "M" ? 1_000_000 : suffix === "B" ? 1_000_000_000 : 1;
+  const numberText = multiplier === 1 ? match[0] : match[0].slice(0, -1);
+  const amount = Number(numberText) * multiplier;
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+function money(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+function loadType(value: string) {
+  const text = clean(value);
+  if (/\bFTL\b|FULL\s*TRUCK|TRUCKLOAD/i.test(text)) return "FTL" as const;
+  const palletCount = Number(text.match(/\d+/)?.[0] ?? 0);
+  return palletCount >= 10 ? ("FTL" as const) : ("LTL" as const);
+}
+
+function distanceBand(destination: string) {
+  const text = clean(destination).toUpperCase();
+  const localCity =
+    /\b(BUENA PARK|ANAHEIM|CERRITOS|LA MIRADA|FULLERTON|LA HABRA|BREA|ORANGE|SANTA ANA|IRVINE|COSTA MESA|HUNTINGTON BEACH|LONG BEACH|CARSON|TORRANCE|COMPTON|DOWNEY|NORWALK|WHITTIER|POMONA|ONTARIO|BLOOMINGTON|LOS ANGELES|GLENDALE|PASADENA)\b/;
+  const localZip =
+    /\b(90[0-8]\d{2}|91[0-2]\d{2}|917\d{2}|918\d{2}|92316|926\d{2}|927\d{2}|928\d{2})\b/;
+  if (localCity.test(text) || localZip.test(text)) return "local";
+  if (/\bCA\b|CALIFORNIA/.test(text)) return "california";
+  return "out-of-state";
+}
+
+function costRecord(
+  dateText: string,
+  invoiceValue: string,
+  rateValue: string,
+  carrier: string,
+  destination: string,
+  pallets: string,
+  isTransfer: boolean,
+) {
+  const date = parseDate(dateText);
+  if (!date) return null;
+  const invoiced = parseMoney(invoiceValue);
+  const rate = parseMoney(rateValue);
+  return {
+    date,
+    cost: invoiced || rate,
+    carrier: clean(carrier).replace(/\s+/g, " "),
+    destination: clean(destination),
+    loadType: loadType(pallets),
+    isTransfer,
+  } satisfies CostRecord;
+}
+
+function truckingCostRecords(table: any, invoiceIndex: number | null = 21) {
+  return (table.rows ?? []).flatMap((row: any) => {
+    const record = costRecord(
+      cell(row, 3),
+      invoiceIndex === null ? "" : cell(row, invoiceIndex),
+      cell(row, 17),
+      cell(row, 16),
+      cell(row, 2),
+      [cell(row, 4), cell(row, 5)].filter(Boolean).join(" "),
+      false,
+    );
+    return record ? [record] : [];
+  });
+}
+
+function transferCostRecords(table: any) {
+  return (table.rows ?? []).flatMap((row: any) => {
+    const record = costRecord(
+      cell(row, 5),
+      cell(row, 9),
+      cell(row, 8),
+      cell(row, 6),
+      cell(row, 4),
+      cell(row, 1),
+      true,
+    );
+    return record ? [record] : [];
+  });
+}
+
+function dedupeCosts(records: CostRecord[]) {
+  const seen = new Set<string>();
+  return records.filter((record) => {
+    const key = [
+      dayKey(record.date),
+      record.carrier.toUpperCase(),
+      record.destination.toUpperCase(),
+      record.cost.toFixed(2),
+      record.isTransfer ? "TRANSFER" : "FREIGHT",
+    ].join("|");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function salesAmounts(table: any, source: "sales" | "national") {
+  return (table.rows ?? []).flatMap((row: any) => {
+    const dateText =
+      source === "sales"
+        ? cell(row, 4) || cell(row, 0)
+        : cell(row, 9) || cell(row, 7) || cell(row, 8) || cell(row, 6);
+    const date = parseDate(dateText);
+    const amount = parseMoney(cell(row, source === "sales" ? 6 : 4));
+    return date && amount ? [{ date, amount }] : [];
+  });
+}
+
+function buildKpis(
+  warehouseTrucking: any,
+  transfers: any,
+  currentOutbound: any,
+  sales: any,
+  national: any,
+): KpiSnapshot {
+  const today = startOfToday();
+  const isYtd = (date: Date) => date.getFullYear() === 2026 && date <= today;
+  const isMtd = (date: Date) =>
+    isYtd(date) && date.getMonth() === today.getMonth();
+  const costs = dedupeCosts([
+    ...truckingCostRecords(warehouseTrucking),
+    ...truckingCostRecords(currentOutbound, null),
+    ...transferCostRecords(transfers),
+  ]);
+  const ytdCosts = costs.filter((record) => isYtd(record.date));
+  const mtdCosts = ytdCosts.filter((record) => isMtd(record.date));
+  const transferYtd = ytdCosts.filter((record) => record.isTransfer);
+  const transferMtd = mtdCosts.filter((record) => record.isTransfer);
+  const salesRows = [...salesAmounts(sales, "sales"), ...salesAmounts(national, "national")];
+  const carrierCounts = ytdCosts.reduce((counts, record) => {
+    if (!record.carrier) return counts;
+    const key = record.carrier.toUpperCase();
+    const current = counts.get(key) ?? { label: record.carrier, count: 0 };
+    current.count += 1;
+    counts.set(key, current);
+    return counts;
+  }, new Map<string, { label: string; count: number }>());
+  const topCarrier =
+    [...carrierCounts.values()].sort((a, b) => b.count - a.count)[0] ??
+    { label: "—", count: 0 };
+  const classified = ytdCosts.filter((record) => !record.isTransfer || record.cost > 0);
+  const ltl = classified.filter((record) => record.loadType === "LTL").length;
+  const ftl = classified.filter((record) => record.loadType === "FTL").length;
+  const splitTotal = ltl + ftl;
+  const average = (band: ReturnType<typeof distanceBand>) => {
+    const matching = ytdCosts.filter(
+      (record) => record.cost > 0 && distanceBand(record.destination) === band,
+    );
+    return matching.length
+      ? matching.reduce((sum, record) => sum + record.cost, 0) / matching.length
+      : 0;
+  };
+  return {
+    shippingMtd: mtdCosts.reduce((sum, record) => sum + record.cost, 0),
+    shippingYtd: ytdCosts.reduce((sum, record) => sum + record.cost, 0),
+    transfersMtd: transferMtd.reduce((sum, record) => sum + record.cost, 0),
+    transfersYtd: transferYtd.reduce((sum, record) => sum + record.cost, 0),
+    salesMtd: salesRows.filter((row) => isMtd(row.date)).reduce((sum, row) => sum + row.amount, 0),
+    salesYtd: salesRows.filter((row) => isYtd(row.date)).reduce((sum, row) => sum + row.amount, 0),
+    topCarrier: topCarrier.label,
+    topCarrierMoves: topCarrier.count,
+    ltlPercent: splitTotal ? Math.round((ltl / splitTotal) * 100) : 0,
+    ftlPercent: splitTotal ? Math.round((ftl / splitTotal) * 100) : 0,
+    avgLocal: average("local"),
+    avgCalifornia: average("california"),
+    avgOutOfState: average("out-of-state"),
+  };
 }
 
 function dayKey(date: Date) {
@@ -412,9 +633,13 @@ function inboundItems(table: any): ScheduleItem[] {
 function ImportSchedules({
   items,
   loading,
+  savingId,
+  onStatus,
 }: {
   items: ScheduleItem[];
   loading: boolean;
+  savingId: string;
+  onStatus: (item: ScheduleItem, status: string) => void;
 }) {
   const sortedItems = [...items].sort((a, b) => a.date.getTime() - b.date.getTime());
   const oceanCount = sortedItems.filter((item) => item.mode === "Ocean").length;
@@ -459,6 +684,7 @@ function ImportSchedules({
               <th>VSL</th>
               <th>POD</th>
               <th>ETA</th>
+              <th>Status</th>
             </tr>
           </thead>
           <tbody>
@@ -488,16 +714,33 @@ function ImportSchedules({
                 <td>{item.vessel || "—"}</td>
                 <td>{item.pod || "—"}</td>
                 <td><time dateTime={dayKey(item.date)}>{item.eta || item.dateText || "—"}</time></td>
+                <td>
+                  {item.editable ? (
+                    <select
+                      className="compact-status-select"
+                      aria-label={`Update ${item.title} status`}
+                      disabled={savingId === item.id}
+                      value={INBOUND_STATUS_OPTIONS.includes(item.status) ? item.status : "Scheduled"}
+                      onChange={(event) => onStatus(item, event.target.value)}
+                    >
+                      {INBOUND_STATUS_OPTIONS.map((option) => (
+                        <option key={option}>{option}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className={statusClass(item.status)}>{item.status}</span>
+                  )}
+                </td>
               </tr>
             ))}
             {!loading && sortedItems.length === 0 && (
               <tr>
-                <td className="import-empty" colSpan={9}>No current or upcoming imports match the active filters.</td>
+                <td className="import-empty" colSpan={10}>No current or upcoming imports match the active filters.</td>
               </tr>
             )}
             {loading && (
               <tr>
-                <td className="import-empty" colSpan={9}>Syncing import schedules…</td>
+                <td className="import-empty" colSpan={10}>Syncing import schedules…</td>
               </tr>
             )}
           </tbody>
@@ -835,10 +1078,14 @@ function SmallParcelSchedule({
   direction,
   items,
   loading,
+  savingId,
+  onStatus,
 }: {
   direction: Direction;
   items: ScheduleItem[];
   loading: boolean;
+  savingId: string;
+  onStatus: (item: ScheduleItem, status: string) => void;
 }) {
   const sortedItems = [...items].sort((a, b) => a.date.getTime() - b.date.getTime());
   const isInbound = direction === "inbound";
@@ -867,33 +1114,54 @@ function SmallParcelSchedule({
         {sortedItems.map((item) => {
           const tracking = item.trackingNumber || item.pro || "";
           return (
-            <article
+            <details
               className={`parcel-card ${sourceClass(item.sourceType ?? "")}`}
               key={`parcel-${item.id}`}
             >
-              <div className="parcel-topline">
+              <summary className="parcel-summary">
                 <span className="source-badge">{item.sourceType || item.carrier || "Parcel"}</span>
-                <span className={statusClass(item.status)}>{item.status}</span>
+                <strong className="parcel-tracking">{tracking || "Tracking pending"}</strong>
+                <span className="parcel-invoice">{item.invoice ? `Invoice # ${item.invoice}` : "Invoice # —"}</span>
+                <span className="expand-mark" aria-hidden="true">＋</span>
+              </summary>
+              <div className="parcel-detail">
+                <div className="parcel-topline">
+                  <span className={statusClass(item.status)}>{item.status}</span>
+                  <span>{item.customer || item.shipmentNo || ""}</span>
+                </div>
+                <div className="parcel-footer">
+                  <span><b>ETA</b> {item.dateText || "—"}</span>
+                  {tracking && item.containerUrl ? (
+                    <a href={item.containerUrl} target="_blank" rel="noreferrer">
+                      Track ↗
+                    </a>
+                  ) : (
+                    <a href={sourceRowUrl(item)} target="_blank" rel="noreferrer">
+                      Source ↗
+                    </a>
+                  )}
+                </div>
+                {item.editable ? (
+                  <label className="status-field parcel-status-field">
+                    <span>Status</span>
+                    <select
+                      aria-label={`Update ${item.title} status`}
+                      disabled={savingId === item.id}
+                      value={
+                        (direction === "inbound" ? INBOUND_STATUS_OPTIONS : STATUS_OPTIONS).includes(item.status)
+                          ? item.status
+                          : "Scheduled"
+                      }
+                      onChange={(event) => onStatus(item, event.target.value)}
+                    >
+                      {(direction === "inbound" ? INBOUND_STATUS_OPTIONS : STATUS_OPTIONS).map((option) => (
+                        <option key={option}>{option}</option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
               </div>
-              <strong className="parcel-tracking">{tracking || "Tracking pending"}</strong>
-              <p>
-                {[item.invoice && `Invoice # ${item.invoice}`, item.customer]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </p>
-              <div className="parcel-footer">
-                <span><b>ETA</b> {item.dateText || "—"}</span>
-                {tracking && item.containerUrl ? (
-                  <a href={item.containerUrl} target="_blank" rel="noreferrer">
-                    Track ↗
-                  </a>
-                ) : (
-                  <a href={sourceRowUrl(item)} target="_blank" rel="noreferrer">
-                    Source ↗
-                  </a>
-                )}
-              </div>
-            </article>
+            </details>
           );
         })}
         {!loading && sortedItems.length === 0 && (
@@ -995,6 +1263,7 @@ export default function Home() {
   const [includeFinished, setIncludeFinished] = useState(false);
   const [savingId, setSavingId] = useState("");
   const [notice, setNotice] = useState("");
+  const [kpis, setKpis] = useState<KpiSnapshot>(EMPTY_KPIS);
 
   const days = useMemo(() => {
     const today = startOfToday();
@@ -1009,11 +1278,20 @@ export default function Home() {
     setLoading(true);
     setError("");
     try {
-      const [inbound, outbound, nationalOutbound, salesOutbound] = await Promise.all([
+      const [
+        inbound,
+        outbound,
+        nationalOutbound,
+        salesOutbound,
+        warehouseTrucking,
+        transfers,
+      ] = await Promise.all([
         fetchTable(SHEET_ID, 2026070701, "A3:S1200", 1),
         fetchTable(SHEET_ID, 20260708, "A2:X1000", 0),
         fetchTable(NATIONAL_SHEET_ID, 99300389, "A1:U3500", 1),
         fetchTable(SALES_SHEET_ID, 0, "A2:AF4200", 1),
+        fetchTable(SHEET_ID, 852802817, "A2:X1609", 1),
+        fetchTable(SHEET_ID, 1834454901, "A1:N974", 1),
       ]);
       setItems([
         ...inboundItems(inbound),
@@ -1021,6 +1299,7 @@ export default function Home() {
         ...nationalOutboundItems(nationalOutbound),
         ...salesOutboundItems(salesOutbound),
       ]);
+      setKpis(buildKpis(warehouseTrucking, transfers, outbound, salesOutbound, nationalOutbound));
       setUpdatedAt(new Date());
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "The live schedule could not be loaded.");
@@ -1101,10 +1380,7 @@ export default function Home() {
   );
 
   const importScheduleItems = useMemo(
-    () =>
-      inboundVisibleItems.filter(
-        (item) => !item.isSmallParcel && !finished.has(item.status.toLowerCase()),
-      ),
+    () => inboundVisibleItems.filter((item) => !item.isSmallParcel),
     [inboundVisibleItems],
   );
 
@@ -1219,6 +1495,54 @@ export default function Home() {
         </article>
       </section>
 
+      <section className="kpi-panel" aria-labelledby="kpi-heading">
+        <div className="kpi-heading">
+          <div>
+            <p className="eyebrow">2026 ACTUALS · INVOICE FIRST / RATE FALLBACK</p>
+            <h2 id="kpi-heading">KPI Control Tower</h2>
+          </div>
+          <span>MTD / YTD</span>
+        </div>
+        <div className="kpi-grid">
+          <article className="kpi-card">
+            <span>SHIPPING COSTS</span>
+            <div><small>MTD</small><strong>{money(kpis.shippingMtd)}</strong></div>
+            <div><small>YTD</small><strong>{money(kpis.shippingYtd)}</strong></div>
+          </article>
+          <article className="kpi-card">
+            <span>TRANSFER SHIPPING</span>
+            <div><small>MTD</small><strong>{money(kpis.transfersMtd)}</strong></div>
+            <div><small>YTD</small><strong>{money(kpis.transfersYtd)}</strong></div>
+          </article>
+          <article className="kpi-card">
+            <span>SALES AMOUNTS</span>
+            <div><small>MTD</small><strong>{money(kpis.salesMtd)}</strong></div>
+            <div><small>YTD</small><strong>{money(kpis.salesYtd)}</strong></div>
+          </article>
+          <article className="kpi-card kpi-carrier">
+            <span>TOP CARRIER · YTD</span>
+            <strong>{kpis.topCarrier}</strong>
+            <small>{kpis.topCarrierMoves} moves</small>
+          </article>
+          <article className="kpi-card kpi-split">
+            <span>TRUCKLOAD MIX · YTD</span>
+            <div><small>LTL</small><strong>{kpis.ltlPercent}%</strong></div>
+            <div><small>FTL</small><strong>{kpis.ftlPercent}%</strong></div>
+          </article>
+          <article className="kpi-card kpi-average">
+            <span>AVG TRUCKING COST · YTD</span>
+            <div><small>LOCAL ≤50 MI</small><strong>{money(kpis.avgLocal)}</strong></div>
+            <div><small>CALIFORNIA</small><strong>{money(kpis.avgCalifornia)}</strong></div>
+            <div><small>OUT OF STATE</small><strong>{money(kpis.avgOutOfState)}</strong></div>
+          </article>
+        </div>
+        <p className="kpi-method">
+          Shipping costs use the Invoiced/Invoice amount when present, then Rate. Sales use 2026
+          invoice and PO amounts. FTL is explicit full-truckload or 10+ pallets; local is measured
+          from Buena Park by destination city/ZIP.
+        </p>
+      </section>
+
       <section className="control-panel" aria-label="Schedule filters">
         <label className="search">
           <span>⌕</span>
@@ -1235,7 +1559,7 @@ export default function Home() {
             checked={includeFinished}
             onChange={(event) => setIncludeFinished(event.target.checked)}
           />
-          Show finished
+          Show completed entries
         </label>
       </section>
 
@@ -1251,7 +1575,12 @@ export default function Home() {
         </div>
       </section>
 
-      <ImportSchedules items={importScheduleItems} loading={loading} />
+      <ImportSchedules
+        items={importScheduleItems}
+        loading={loading}
+        savingId={savingId}
+        onStatus={handleStatus}
+      />
 
       <div className="schedule-stack" aria-label="Separate inbound and outbound schedules">
         <ScheduleBoard
@@ -1266,6 +1595,8 @@ export default function Home() {
           direction="inbound"
           items={inboundParcelVisibleItems}
           loading={loading}
+          savingId={savingId}
+          onStatus={handleStatus}
         />
         <ScheduleBoard
           direction="outbound"
@@ -1279,6 +1610,8 @@ export default function Home() {
           direction="outbound"
           items={outboundParcelVisibleItems}
           loading={loading}
+          savingId={savingId}
+          onStatus={handleStatus}
         />
       </div>
 

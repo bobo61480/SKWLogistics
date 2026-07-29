@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const developmentPreviewMeta =
@@ -30,4 +31,25 @@ test("renders development preview metadata", async () => {
     /^text\/html\b/i,
   );
   assert.match(await response.text(), developmentPreviewMeta);
+});
+
+test("keeps the requested schedule order and KPI controls", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const sections = [
+    "<ImportSchedules",
+    '<ScheduleBoard\n          direction="inbound"',
+    '<SmallParcelSchedule\n          direction="inbound"',
+    '<ScheduleBoard\n          direction="outbound"',
+    '<SmallParcelSchedule\n          direction="outbound"',
+  ];
+  let lastIndex = -1;
+  for (const section of sections) {
+    const index = source.indexOf(section, lastIndex + 1);
+    assert.ok(index > lastIndex, `${section} must follow the prior schedule section`);
+    lastIndex = index;
+  }
+  assert.match(source, /KPI Control Tower/);
+  assert.match(source, /Show completed entries/);
+  assert.match(source, /TRANSFER SHIPPING/);
+  assert.match(source, /AVG TRUCKING COST · YTD/);
 });
