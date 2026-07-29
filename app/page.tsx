@@ -612,15 +612,119 @@ function normalizeStatus(value: string) {
   return normalized.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function inboundItems(table: any): ScheduleItem[] {
+type ImportSourceRecord = {
+  sourceRow: number;
+  shipmentNo: string;
+  invoice: string;
+  mbl: string;
+  hbl: string;
+  container: string;
+  vessel: string;
+  status: string;
+};
+
+function importSourceRecords(table: any): ImportSourceRecord[] {
+  return (table.rows ?? []).flatMap((row: any, index: number) => {
+    const sourceRow = index + 2;
+    const shipmentNo = cell(row, 0);
+    const invoice = cell(row, 2);
+    const mbl = cell(row, 3);
+    const hbl = cell(row, 4);
+    if (!shipmentNo && !invoice && !mbl && !hbl) return [];
+    return [
+      {
+        sourceRow,
+        shipmentNo,
+        invoice,
+        mbl,
+        hbl,
+        container: cell(row, 7),
+        vessel: cell(row, 14),
+        status: cell(row, 29),
+      },
+    ];
+  });
+}
+
+function normalizedIdentifier(value: string) {
+  return clean(value).replace(/\s+/g, "").toUpperCase();
+}
+
+function resolveImportSource(
+  records: ImportSourceRecord[],
+  shipmentNo: string,
+  invoice: string,
+  mbl: string,
+  hbl: string,
+) {
+  const shipmentKey = normalizedIdentifier(shipmentNo);
+  const invoiceKeys = splitValues(invoice).map(normalizedIdentifier).filter(Boolean);
+  const mblKey = normalizedIdentifier(mbl);
+  const hblKey = normalizedIdentifier(hbl);
+
+  return (
+    records.find(
+      (record) =>
+        shipmentKey &&
+        normalizedIdentifier(record.shipmentNo) === shipmentKey,
+    ) ??
+    records.find((record) => {
+      const recordInvoices = splitValues(record.invoice).map(normalizedIdentifier);
+      const invoiceMatch =
+        invoiceKeys.length > 0 &&
+        invoiceKeys.some((value) => recordInvoices.includes(value));
+      const mblMatch = mblKey && normalizedIdentifier(record.mbl) === mblKey;
+      const hblMatch = hblKey && normalizedIdentifier(record.hbl) === hblKey;
+      return invoiceMatch && (mblMatch || hblMatch);
+    }) ??
+    null
+  );
+}
+
+function resolvedInboundMode(
+  reportedMode: string,
+  shipmentNo: string,
+  mbl: string,
+  vessel: string,
+) {
+  const normalizedMbl = normalizedIdentifier(mbl);
+  const normalizedVessel = clean(vessel).toUpperCase();
+  const isAirWaybill = /^\d{3}-?\d{8}$/.test(normalizedMbl);
+  const isFlightNumber = /^(?:[A-Z]{2}|[A-Z]\d|\d[A-Z])[- ]?\d{2,4}[A-Z]?$/.test(
+    normalizedVessel,
+  );
+  if (
+    /^JSL26072(?:6|7)$/i.test(shipmentNo) ||
+    isAirWaybill ||
+    isFlightNumber ||
+    /\bAIR\b/i.test(reportedMode)
+  ) {
+    return "Air";
+  }
+  return /\bOCEAN\b/i.test(reportedMode) ? "Ocean" : clean(reportedMode) || "Ocean";
+}
+
+function inboundItems(table: any, importsTable: any): ScheduleItem[] {
+  const imports = importSourceRecords(importsTable);
   return (table.rows ?? []).flatMap((row: any, index: number) => {
     const eta = cell(row, 12);
     const expectedDelivery = cell(row, 14);
-    const importsSourceRow = Number(cell(row, 17));
     const shipmentNo = cell(row, 1);
-    const container = cell(row, 6);
+    const invoiceValue = cell(row, 3);
+    const mbl = cell(row, 4);
+    const hbl = cell(row, 5);
+    const importSource = resolveImportSource(
+      imports,
+      shipmentNo,
+      invoiceValue,
+      mbl,
+      hbl,
+    );
+    const importsSourceRow = importSource?.sourceRow ?? Number(cell(row, 17));
+    const container = cell(row, 6) || importSource?.container || "";
     const reportedMode = cell(row, 0);
-    const mode = /^JSL260726$/i.test(shipmentNo) ? "Air" : reportedMode;
+    const vessel = cell(row, 10) || importSource?.vessel || "";
+    const mode = resolvedInboundMode(reportedMode, shipmentNo, mbl, vessel);
     const smallParcelCarrier = parcelCarrier([mode, shipmentNo].join(" "));
     const isSmallParcel = Boolean(smallParcelCarrier);
     const parcelTracking = isSmallParcel
@@ -638,12 +742,12 @@ function inboundItems(table: any): ScheduleItem[] {
     }
     const { date, text: dateText } = datedValue;
     const sourceRow = importsSourceRow || index + 4;
-    const status = normalizeStatus(cell(row, 16));
+    const status = normalizeStatus(importSource?.status || cell(row, 16));
     const folderUrl = INBOUND_DOCUMENT_LINKS[shipmentNo] ?? importsCellUrl(sourceRow, "B");
     const carrierKey = [cell(row, 0), cell(row, 4), cell(row, 5), cell(row, 10), shipmentNo]
       .filter(Boolean)
       .join(" ");
-    const invoice = correctedInboundInvoice(shipmentNo, cell(row, 3));
+    const invoice = correctedInboundInvoice(shipmentNo, invoiceValue);
     const trackingNumber = parcelTracking || container;
     return [
       {
@@ -667,12 +771,12 @@ function inboundItems(table: any): ScheduleItem[] {
           `${carrierKey} ${smallParcelCarrier}`,
           importsCellUrl(sourceRow, "H"),
         ),
-        mbl: cell(row, 4),
-        hbl: cell(row, 5),
+        mbl,
+        hbl,
         invoice,
         invoiceUrl: invoiceFileUrl(splitValues(invoice)[0] ?? ""),
         mode,
-        vessel: cell(row, 10),
+        vessel,
         pod: /^OSL/i.test(shipmentNo) ? "LGB" : "LAX",
         eta: expectedDelivery || (isSmallParcel ? dateText : eta),
         carrier: smallParcelCarrier,
@@ -980,6 +1084,7 @@ async function postStatus(item: ScheduleItem, status: string) {
     status,
   };
   const body = JSON.stringify(payload);
+  let submitted = false;
   try {
     const response = await fetch(WRITE_ENDPOINT, {
       method: "POST",
@@ -989,17 +1094,56 @@ async function postStatus(item: ScheduleItem, status: string) {
     if (response.ok) {
       const result = await response.json().catch(() => ({ ok: true }));
       if (result?.ok === false) throw new Error(result.error || "The update was rejected.");
-      return;
+      submitted = true;
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && /rejected/i.test(error.message)) throw error;
     // Domain-restricted Apps Script endpoints can reject a readable CORS response.
   }
-  await fetch(WRITE_ENDPOINT, {
-    method: "POST",
-    mode: "no-cors",
-    headers: { "Content-Type": "text/plain" },
-    body,
-  });
+  if (!submitted) {
+    await fetch(WRITE_ENDPOINT, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain" },
+      body,
+    });
+  }
+
+  const expectedStatus = normalizeStatus(status);
+  for (const delay of [350, 900, 1800]) {
+    await new Promise((resolve) => window.setTimeout(resolve, delay));
+    try {
+      let persisted = "";
+      if (item.sourceSheet === "IMPORTS") {
+        const table = await fetchTable(
+          SHEET_ID,
+          1497250700,
+          `AD${item.sourceRow}:AD${item.sourceRow}`,
+          0,
+        );
+        persisted = cell(table.rows?.[0], 0);
+      } else if (item.sourceSheet === "Outbound Shipping Schedule") {
+        const table = await fetchTable(
+          SHEET_ID,
+          20260708,
+          `U${item.sourceRow}:X${item.sourceRow}`,
+          0,
+        );
+        persisted = cell(table.rows?.[0], 3) || cell(table.rows?.[0], 0);
+      }
+      if (
+        persisted &&
+        normalizeStatus(persisted) === expectedStatus
+      ) {
+        return;
+      }
+    } catch {
+      // Retry while the workbook recalculates and publishes its latest values.
+    }
+  }
+  throw new Error(
+    "The source sheet did not confirm this status change. The card was left unchanged.",
+  );
 }
 
 function ScheduleCard({
@@ -1364,6 +1508,7 @@ export default function Home() {
     try {
       const [
         inbound,
+        imports,
         outbound,
         nationalOutbound,
         salesOutbound,
@@ -1371,6 +1516,7 @@ export default function Home() {
         transfers,
       ] = await Promise.all([
         fetchTable(SHEET_ID, 2026070701, "A3:S1200", 1),
+        fetchTable(SHEET_ID, 1497250700, "A1:AF1200", 1),
         fetchTable(SHEET_ID, 20260708, "A2:X1000", 0),
         fetchTable(NATIONAL_SHEET_ID, 99300389, "A1:U3500", 1),
         fetchTable(SALES_SHEET_ID, 0, "A2:AF4200", 1),
@@ -1378,7 +1524,7 @@ export default function Home() {
         fetchTable(SHEET_ID, 1834454901, "A1:N974", 1),
       ]);
       setItems([
-        ...inboundItems(inbound),
+        ...inboundItems(inbound, imports),
         ...outboundItems(outbound),
         ...nationalOutboundItems(nationalOutbound),
         ...salesOutboundItems(salesOutbound),
