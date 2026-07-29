@@ -1428,13 +1428,13 @@ export default function Home() {
         </div>
         <div className="manifest-main">
           <div>
-            <p className="eyebrow">LOGISTICS MASTER 2026 · LIVE 14-DAY FORECAST</p>
+            <p className="eyebrow">LOGISTICS MASTER 2026 · LIVE WORKBOOK SYNC</p>
             <h1>
-              Inbound <em>+</em> Outbound Schedule
+              StyleKorean<br />Logistics Hub
             </h1>
             <p className="intro">
-              Compact live view for inbound documents and container tracking, plus outbound
-              customer, carrier, booking, and PRO references.
+              Every import, inbound delivery, trucking move, and small-parcel shipment
+              across the next fourteen days—one operational board.
             </p>
           </div>
           <div className="manifest-actions">
