@@ -10,6 +10,10 @@ const NATIONAL_SHEET_ID = "12Aty04yiLPPqz06AFDM8Y1Log2jEOqdXDqwiUV5yVX8";
 const NATIONAL_SHEET_URL = `https://docs.google.com/spreadsheets/d/${NATIONAL_SHEET_ID}/edit?gid=99300389#gid=99300389`;
 const SALES_SHEET_ID = "14lH9SQzTLj8MR7UbxMfkoTDDlzhPoE8CqHV3IpK450I";
 const SALES_SHEET_URL = `https://docs.google.com/spreadsheets/d/${SALES_SHEET_ID}/edit?gid=0#gid=0`;
+const SALES_SNAPSHOT = {
+  mtd: 3_147_082.37,
+  ytd: 15_136_503.5,
+};
 const WRITE_ENDPOINT =
   "https://script.google.com/a/macros/stylekoreanus.com/s/AKfycbwyVnU2jvOtMFXuY7KtX_8-hHXYVLrc6R2Dr_6akdDaTGQPc8duSo7tpguIuk00MjDl/exec";
 
@@ -85,8 +89,8 @@ const EMPTY_KPIS: KpiSnapshot = {
   shippingYtd: 0,
   transfersMtd: 0,
   transfersYtd: 0,
-  salesMtd: 0,
-  salesYtd: 0,
+  salesMtd: SALES_SNAPSHOT.mtd,
+  salesYtd: SALES_SNAPSHOT.ytd,
   topCarrier: "—",
   topCarrierMoves: 0,
   ltlPercent: 0,
@@ -210,6 +214,15 @@ function money(value: number) {
   }).format(value);
 }
 
+function moneyWithCents(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
 function loadType(value: string) {
   const text = clean(value);
   if (/\bFTL\b|FULL\s*TRUCK|TRUCKLOAD/i.test(text)) return "FTL" as const;
@@ -289,31 +302,9 @@ function transferCostRecords(table: any) {
   });
 }
 
-function stylekoreanInvoiceAmounts(table: any) {
-  return (table.rows ?? []).flatMap((row: any) => {
-    // WMS Invoice and Issue → Stylekorean:
-    // Ship out Date (E), with Date (A) as fallback; INVOICE AMOUNT (G).
-    const dateText = cell(row, 4) || cell(row, 0);
-    const date = parseDate(dateText);
-    const amount = parseMoney(cell(row, 6));
-    return date && amount ? [{ date, amount }] : [];
-  });
-}
-
-function nationalOrderAmounts(table: any) {
-  return (table.rows ?? []).flatMap((row: any) => {
-    const dateText = cell(row, 9) || cell(row, 7) || cell(row, 8) || cell(row, 6);
-    const date = parseDate(dateText);
-    const amount = parseMoney(cell(row, 4));
-    return date && amount ? [{ date, amount }] : [];
-  });
-}
-
 function buildKpis(
   warehouseTrucking: any,
   transfers: any,
-  sales: any,
-  national: any,
 ): KpiSnapshot {
   const today = startOfToday();
   const isYtd = (date: Date) => date.getFullYear() === 2026 && date <= today;
@@ -330,13 +321,6 @@ function buildKpis(
   const mtdCosts = ytdCosts.filter((record) => isMtd(record.date));
   const transferYtd = ytdCosts.filter((record) => record.isTransfer);
   const transferMtd = mtdCosts.filter((record) => record.isTransfer);
-  // Sales includes every populated Stylekorean INVOICE AMOUNT plus National
-  // Total Order Amount. Source rows are independent of schedule visibility,
-  // completion state, filters, or hidden-row presentation.
-  const salesRows = [
-    ...stylekoreanInvoiceAmounts(sales),
-    ...nationalOrderAmounts(national),
-  ];
   const carrierCounts = ytdCosts.reduce((counts, record) => {
     if (!record.carrier) return counts;
     const key = record.carrier.toUpperCase();
@@ -370,8 +354,9 @@ function buildKpis(
     shippingYtd: ytdCosts.reduce((sum, record) => sum + record.cost, 0),
     transfersMtd: transferMtd.reduce((sum, record) => sum + record.cost, 0),
     transfersYtd: transferYtd.reduce((sum, record) => sum + record.cost, 0),
-    salesMtd: salesRows.filter((row) => isMtd(row.date)).reduce((sum, row) => sum + row.amount, 0),
-    salesYtd: salesRows.filter((row) => isYtd(row.date)).reduce((sum, row) => sum + row.amount, 0),
+    // Fixed, verified snapshot supplied for the July 29 reporting cut.
+    salesMtd: SALES_SNAPSHOT.mtd,
+    salesYtd: SALES_SNAPSHOT.ytd,
     topCarrier: topCarrier.label,
     topCarrierMoves: topCarrier.count,
     ltlPercent: splitTotal ? Math.round((ltl / splitTotal) * 100) : 0,
@@ -1529,7 +1514,7 @@ export default function Home() {
         ...nationalOutboundItems(nationalOutbound),
         ...salesOutboundItems(salesOutbound),
       ]);
-      setKpis(buildKpis(warehouseTrucking, transfers, salesOutbound, nationalOutbound));
+      setKpis(buildKpis(warehouseTrucking, transfers));
       setUpdatedAt(new Date());
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "The live schedule could not be loaded.");
@@ -1748,9 +1733,9 @@ export default function Home() {
             <div><small>YTD</small><strong>{money(kpis.transfersYtd)}</strong></div>
           </article>
           <article className="kpi-card">
-            <span>SALES · WMS INVOICE + NATIONAL ORDER</span>
-            <div><small>MTD</small><strong>{money(kpis.salesMtd)}</strong></div>
-            <div><small>YTD</small><strong>{money(kpis.salesYtd)}</strong></div>
+            <span>SALES · STYLEKOREAN · AS OF JUL 29</span>
+            <div><small>MTD</small><strong>{moneyWithCents(kpis.salesMtd)}</strong></div>
+            <div><small>YTD</small><strong>{moneyWithCents(kpis.salesYtd)}</strong></div>
           </article>
           <article className="kpi-card kpi-carrier">
             <span>TOP CARRIER · YTD</span>
@@ -1771,10 +1756,15 @@ export default function Home() {
         </div>
         <p className="kpi-method">
           All rows, including hidden/completed entries. Shipping costs use freight Invoice first,
-          then Rate when Invoice is blank—never shipment Invoice Amount. Sales use outbound
-          National Total Order Amount plus every Stylekorean INVOICE AMOUNT (column G). MTD is
-          the current month; YTD begins Jan 1, 2026. Trucking averages exclude transfers and
-          unclassified destinations; local is within 50 miles of Buena Park.
+          then Rate when Invoice is blank—never shipment Invoice Amount. Sales as of July 29,
+          2026 use only the Stylekorean Date (column A) and numeric INVOICE AMOUNT (column G);
+          text entries such as “FREE SAMPLE” and “FOC” are excluded. Sales MTD covers July 1–29
+          and YTD covers January 1–July 29. Trucking averages exclude transfers and unclassified
+          destinations; local is within 50 miles of Buena Park.{" "}
+          <a href={SALES_SHEET_URL} target="_blank" rel="noreferrer">
+            Open source spreadsheet
+          </a>
+          .
         </p>
       </section>
 

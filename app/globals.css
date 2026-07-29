@@ -300,6 +300,12 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
   font: 500 8px/1.4 "IBM Plex Mono", monospace;
 }
 
+.kpi-method a {
+  color: var(--orange-dark);
+  font-weight: 700;
+  text-underline-offset: 2px;
+}
+
 .control-panel {
   display: grid;
   grid-template-columns: minmax(260px, 1fr) auto;

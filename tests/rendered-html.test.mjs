@@ -56,8 +56,14 @@ test("keeps the requested schedule order and KPI controls", async () => {
   assert.match(source, /!record\.isTransfer/);
   assert.match(source, /parseFreightCost/);
   assert.match(source, /amount <= 250_000/);
-  assert.match(source, /stylekoreanInvoiceAmounts/);
+  assert.match(source, /SALES_SNAPSHOT/);
+  assert.match(source, /3_147_082\.37/);
+  assert.match(source, /15_136_503\.5/);
   assert.match(source, /INVOICE AMOUNT \(column G\)/);
+  assert.match(source, /Date \(column A\)/);
+  assert.match(source, /FREE SAMPLE/);
+  assert.match(source, /SALES · STYLEKOREAN · AS OF JUL 29/);
+  assert.doesNotMatch(source, /National Total Order Amount plus every Stylekorean/);
   assert.match(source, /Outbound departments/);
   assert.match(source, /B2B\/E-Com/);
   assert.match(source, /departmentClass/);
