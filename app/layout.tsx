@@ -13,11 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Starter Project",
-  description: "A clean starting point for building your site.",
-  other: {
-    "codex-preview": "development",
-  },
+  title: "StyleKorean Logistics Planner",
+  description:
+    "Live inbound and outbound shipment planning, status tracking, document access, and logistics KPIs for StyleKorean.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
