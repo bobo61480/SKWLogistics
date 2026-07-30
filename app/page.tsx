@@ -161,12 +161,6 @@ function cell(row: any, index: number) {
 }
 
 function numericCell(row: any, index: number) {
-  if (Array.isArray(row)) {
-    const text = clean(row[index]).replace(/[$,\s]/g, "");
-    if (!/^-?\d+(?:\.\d+)?$/.test(text)) return null;
-    const amount = Number(text);
-    return Number.isFinite(amount) ? amount : null;
-  }
   const value = row?.c?.[index]?.v;
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -681,6 +675,17 @@ async function fetchCsvRows(spreadsheetId: string, gid: number) {
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) throw new Error(`Workbook read failed (${response.status}).`);
   return parseCsv(await response.text());
+}
+
+async function fetchSalesKpis() {
+  const response = await fetch("/api/sales-kpis", { cache: "no-store" });
+  if (!response.ok) throw new Error(`Sales KPI read failed (${response.status}).`);
+  return response.json() as Promise<
+    Pick<
+      KpiSnapshot,
+      "nationalsSalesMtd" | "nationalsSalesYtd" | "wmsSalesMtd" | "wmsSalesYtd"
+    >
+  >;
 }
 
 function normalizeStatus(value: string) {
@@ -1744,27 +1749,28 @@ export default function Home() {
         salesOutbound,
         warehouseTrucking,
         transfers,
+        salesKpis,
       ] = await Promise.all([
         fetchTable(SHEET_ID, 2026070701, "A3:S1200", 1),
         fetchCsvRows(SHEET_ID, 1497250700),
         fetchCsvRows(SHEET_ID, 20260708),
-        // Full CSV exports preserve hidden source rows. The GViz feed omits
-        // them, which made MTD and YTD collapse to the same visible-row total.
-        fetchCsvRows(NATIONAL_SHEET_ID, 99300389),
-        fetchCsvRows(SALES_SHEET_ID, 0),
+        fetchTable(NATIONAL_SHEET_ID, 99300389, "A1:U3500", 1),
+        fetchTable(SALES_SHEET_ID, 0, "A2:AF4200", 1),
         fetchTable(SHEET_ID, 852802817, "A2:X1609", 1),
         fetchTable(SHEET_ID, 1834454901, "A1:N974", 1),
+        fetchSalesKpis(),
       ]);
-      const nationalSalesRows = nationalOutbound.slice(1);
-      const wmsSalesRows = salesOutbound.slice(2);
       setItems([
         ...inboundItems(inbound, imports),
         ...inboundParcelItems(imports),
         ...outboundItems(outbound),
-        ...nationalOutboundItems(nationalSalesRows),
-        ...salesOutboundItems(wmsSalesRows),
+        ...nationalOutboundItems(nationalOutbound),
+        ...salesOutboundItems(salesOutbound),
       ]);
-      setKpis(buildKpis(warehouseTrucking, transfers, wmsSalesRows, nationalSalesRows));
+      setKpis({
+        ...buildKpis(warehouseTrucking, transfers, salesOutbound, nationalOutbound),
+        ...salesKpis,
+      });
       const refreshedAt = new Date();
       lastRefreshAt.current = refreshedAt.getTime();
       setUpdatedAt(refreshedAt);

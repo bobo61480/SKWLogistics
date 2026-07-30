@@ -80,18 +80,36 @@ test("keeps the requested schedule order and KPI controls", async () => {
   assert.doesNotMatch(source, /\.\.\.truckingCostRecords\(currentOutbound/);
 });
 
-test("uses complete CSV sales ledgers for MTD and YTD", async () => {
+test("uses the complete-ledger sales KPI endpoint", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  assert.match(source, /fetchCsvRows\(NATIONAL_SHEET_ID,\s*99300389\)/);
-  assert.match(source, /fetchCsvRows\(SALES_SHEET_ID,\s*0\)/);
-  assert.match(source, /const nationalSalesRows = nationalOutbound\.slice\(1\)/);
-  assert.match(source, /const wmsSalesRows = salesOutbound\.slice\(2\)/);
-  assert.match(
-    source,
-    /buildKpis\(warehouseTrucking,\s*transfers,\s*wmsSalesRows,\s*nationalSalesRows\)/,
+  assert.match(source, /fetch\("\/api\/sales-kpis"/);
+  assert.match(source, /\.\.\.salesKpis/);
+});
+
+test("calculates MTD and YTD from every source row", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("sales-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const response = await worker.fetch(
+    new Request("http://localhost/api/sales-kpis"),
+    {
+      ASSETS: {
+        fetch: async () => new Response("Not found", { status: 404 }),
+      },
+    },
+    {
+      waitUntil() {},
+      passThroughOnException() {},
+    },
   );
-  assert.match(source, /if \(Array\.isArray\(row\)\)/);
+  const kpis = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(kpis.nationalsSalesMtd, 2_209_375.46);
+  assert.equal(kpis.nationalsSalesYtd, 6_244_884.52);
+  assert.ok(Math.abs(kpis.wmsSalesMtd - 3_601_652.95) < 0.001);
+  assert.ok(Math.abs(kpis.wmsSalesYtd - 15_591_074.08) < 0.001);
 });
 
 test("preserves physical Google Sheet rows for every editable write-back", async () => {
