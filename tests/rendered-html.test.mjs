@@ -75,6 +75,11 @@ test("preserves physical Google Sheet rows for every editable write-back", async
   assert.match(source, /function parseCsv\(/);
   assert.match(source, /fetchCsvRows\(SHEET_ID, 1497250700\)/);
   assert.match(source, /fetchCsvRows\(SHEET_ID, 20260708\)/);
+  assert.match(source, /function inboundParcelItems\(rows: string\[\]\[\]\)/);
+  assert.match(source, /\.\.\.inboundParcelItems\(imports\)/);
+  assert.match(source, /const status = normalizeStatus\(cell\(row, 29\)\)/);
+  assert.match(source, /const overdue = unfinished && sourceDate\.getTime\(\) < today\.getTime\(\)/);
+  assert.match(source, /record\.sourceRow === item\.sourceRow/);
   assert.match(source, /const sourceRow = index \+ 1/);
   assert.match(source, /did not contain one unique matching shipment row/);
   assert.doesNotMatch(source, /Number\(cell\(row, 17\)\)/);

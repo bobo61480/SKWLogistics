@@ -683,6 +683,77 @@ function importSourceRecords(rows: string[][]): ImportSourceRecord[] {
   });
 }
 
+function inboundParcelItems(rows: string[][]): ScheduleItem[] {
+  let currentCarrier = "";
+  const today = startOfToday();
+
+  return rows.flatMap((row, index) => {
+    const firstColumn = cell(row, 0);
+    const sectionCarrier = parcelCarrier(firstColumn);
+    if (sectionCarrier) {
+      currentCarrier = sectionCarrier;
+    } else if (firstColumn) {
+      currentCarrier = "";
+    }
+    if (!currentCarrier) return [];
+
+    const trackingNumber = trackingCandidate(cell(row, 1), cell(row, 10));
+    const invoice = cell(row, 2);
+    const department = cell(row, 3);
+    const description = cell(row, 4);
+    const etaSource = cell(row, 7) || cell(row, 8);
+    const isSectionHeader =
+      /TRACKING\s*#?/i.test(cell(row, 1)) ||
+      (!trackingNumber && !invoice && !department && !description && !etaSource);
+    if (isSectionHeader) return [];
+
+    const sourceRow = index + 1;
+    const status = normalizeStatus(cell(row, 29));
+    const datedValue = firstDatedValue(etaSource, description);
+    const sourceDate = datedValue?.date ?? today;
+    const unfinished = !finished.has(status.toLowerCase());
+    const overdue = unfinished && sourceDate.getTime() < today.getTime();
+    const date = overdue ? today : sourceDate;
+    const etaText = datedValue?.text
+      ? `${datedValue.text}${overdue ? " · OVERDUE" : ""}`
+      : "ETA pending";
+    const shipmentNo = trackingNumber || `${currentCarrier}-${sourceRow}`;
+
+    return [
+      {
+        id: `inbound-parcel-${sourceRow}`,
+        direction: "inbound",
+        date,
+        dateText: etaText,
+        title: trackingNumber || "Tracking pending",
+        reference: trackingNumber || invoice || `${currentCarrier} parcel`,
+        secondary: [department, description].filter(Boolean).join(" · "),
+        status,
+        sourceSheet: "IMPORTS",
+        sourceRow,
+        sourceUrl: SHEET_URL,
+        editable: true,
+        shipmentNo,
+        shipmentUrl: importsCellUrl(sourceRow, "B"),
+        invoice,
+        invoiceUrl: invoice ? invoiceFileUrl(splitValues(invoice)[0] ?? "") : "",
+        containerUrl: officialTrackingUrl(
+          trackingNumber,
+          currentCarrier,
+          importsCellUrl(sourceRow, "B"),
+        ),
+        eta: etaText,
+        carrier: currentCarrier,
+        trackingNumber,
+        pro: trackingNumber,
+        isSmallParcel: true,
+        shippingMethod: currentCarrier,
+        sourceType: outboundSourceType(currentCarrier, true),
+      },
+    ];
+  });
+}
+
 function normalizedIdentifier(value: string) {
   return clean(value).replace(/\s+/g, "").toUpperCase();
 }
@@ -769,42 +840,38 @@ function inboundItems(table: any, importsRows: string[][]): ScheduleItem[] {
     const mode = resolvedInboundMode(reportedMode, shipmentNo, mbl, vessel);
     const smallParcelCarrier = parcelCarrier([mode, shipmentNo].join(" "));
     const isSmallParcel = Boolean(smallParcelCarrier);
-    const parcelTracking = isSmallParcel
-      ? trackingCandidate(container, shipmentNo, cell(row, 2), cell(row, 5), cell(row, 4))
-      : "";
-    const datedValue = isSmallParcel
-      ? firstDatedValue(expectedDelivery, eta, cell(row, 9), cell(row, 5), cell(row, 2))
-      : firstDatedValue(expectedDelivery, eta);
+    if (isSmallParcel) return [];
+    const datedValue = firstDatedValue(expectedDelivery, eta);
     if (
       !datedValue ||
-      (!importsSourceRow && !isSmallParcel) ||
-      (!shipmentNo && !container && !parcelTracking)
+      !importsSourceRow ||
+      (!shipmentNo && !container)
     ) {
       return [];
     }
     const { date, text: dateText } = datedValue;
-    const sourceRow = importsSourceRow || index + 4;
+    const sourceRow = importsSourceRow;
     const status = normalizeStatus(importSource?.status || cell(row, 16));
     const folderUrl = INBOUND_DOCUMENT_LINKS[shipmentNo] ?? importsCellUrl(sourceRow, "B");
     const carrierKey = [cell(row, 0), cell(row, 4), cell(row, 5), cell(row, 10), shipmentNo]
       .filter(Boolean)
       .join(" ");
     const invoice = correctedInboundInvoice(shipmentNo, invoiceValue);
-    const trackingNumber = parcelTracking || container;
+    const trackingNumber = container;
     return [
       {
         id: `inbound-${sourceRow}-${index}`,
         direction: "inbound",
         date,
         dateText,
-        title: isSmallParcel ? trackingNumber || shipmentNo : shipmentNo || container,
+        title: shipmentNo || container,
         reference: trackingNumber || invoice || "Inbound shipment",
         secondary: [cell(row, 0), cell(row, 10)].filter(Boolean).join(" · "),
         status,
-        sourceSheet: importsSourceRow ? "IMPORTS" : "INBOUND SHIPMENTS DATA",
+        sourceSheet: "IMPORTS",
         sourceRow,
         sourceUrl: SHEET_URL,
-        editable: Boolean(importsSourceRow),
+        editable: true,
         shipmentNo,
         shipmentUrl: folderUrl,
         container,
@@ -820,17 +887,13 @@ function inboundItems(table: any, importsRows: string[][]): ScheduleItem[] {
         mode,
         vessel,
         pod: /^OSL/i.test(shipmentNo) ? "LGB" : "LAX",
-        eta: expectedDelivery || (isSmallParcel ? dateText : eta),
-        carrier: smallParcelCarrier,
-        trackingNumber: isSmallParcel ? trackingNumber : "",
-        pro: isSmallParcel ? trackingNumber : "",
-        isSmallParcel,
-        shippingMethod: isSmallParcel ? smallParcelCarrier : mode,
-        sourceType: isSmallParcel
-          ? outboundSourceType(smallParcelCarrier, true)
-          : mode === "Ocean"
-            ? "Ocean"
-            : "Air",
+        eta: expectedDelivery || eta,
+        carrier: "",
+        trackingNumber: "",
+        pro: "",
+        isSmallParcel: false,
+        shippingMethod: mode,
+        sourceType: mode === "Ocean" ? "Ocean" : "Air",
       },
     ];
   });
@@ -1166,14 +1229,21 @@ function salesOutboundItems(table: any): ScheduleItem[] {
 async function postStatus(item: ScheduleItem, status: string) {
   let sourceRow = item.sourceRow;
   if (item.sourceSheet === "IMPORTS") {
-    const imports = importSourceRecords(await fetchCsvRows(SHEET_ID, 1497250700));
-    const source = resolveImportSource(
-      imports,
-      item.shipmentNo ?? "",
-      item.invoice ?? "",
-      item.mbl ?? "",
-      item.hbl ?? "",
-    );
+    const importsRows = await fetchCsvRows(SHEET_ID, 1497250700);
+    const source = item.isSmallParcel
+      ? inboundParcelItems(importsRows).find(
+          (record) =>
+            record.sourceRow === item.sourceRow &&
+            normalizedIdentifier(record.trackingNumber || record.invoice || "") ===
+              normalizedIdentifier(item.trackingNumber || item.invoice || ""),
+        )
+      : resolveImportSource(
+          importSourceRecords(importsRows),
+          item.shipmentNo ?? "",
+          item.invoice ?? "",
+          item.mbl ?? "",
+          item.hbl ?? "",
+        );
     if (!source) {
       throw new Error("The IMPORTS sheet did not contain one unique matching shipment row.");
     }
@@ -1640,6 +1710,7 @@ export default function Home() {
       ]);
       setItems([
         ...inboundItems(inbound, imports),
+        ...inboundParcelItems(imports),
         ...outboundItems(outbound),
         ...nationalOutboundItems(nationalOutbound),
         ...salesOutboundItems(salesOutbound),
