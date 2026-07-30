@@ -80,6 +80,20 @@ test("keeps the requested schedule order and KPI controls", async () => {
   assert.doesNotMatch(source, /\.\.\.truckingCostRecords\(currentOutbound/);
 });
 
+test("uses complete CSV sales ledgers for MTD and YTD", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /fetchCsvRows\(NATIONAL_SHEET_ID,\s*99300389\)/);
+  assert.match(source, /fetchCsvRows\(SALES_SHEET_ID,\s*0\)/);
+  assert.match(source, /const nationalSalesRows = nationalOutbound\.slice\(1\)/);
+  assert.match(source, /const wmsSalesRows = salesOutbound\.slice\(2\)/);
+  assert.match(
+    source,
+    /buildKpis\(warehouseTrucking,\s*transfers,\s*wmsSalesRows,\s*nationalSalesRows\)/,
+  );
+  assert.match(source, /if \(Array\.isArray\(row\)\)/);
+});
+
 test("preserves physical Google Sheet rows for every editable write-back", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(source, /function parseCsv\(/);

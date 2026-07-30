@@ -161,6 +161,12 @@ function cell(row: any, index: number) {
 }
 
 function numericCell(row: any, index: number) {
+  if (Array.isArray(row)) {
+    const text = clean(row[index]).replace(/[$,\s]/g, "");
+    if (!/^-?\d+(?:\.\d+)?$/.test(text)) return null;
+    const amount = Number(text);
+    return Number.isFinite(amount) ? amount : null;
+  }
   const value = row?.c?.[index]?.v;
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -1742,19 +1748,23 @@ export default function Home() {
         fetchTable(SHEET_ID, 2026070701, "A3:S1200", 1),
         fetchCsvRows(SHEET_ID, 1497250700),
         fetchCsvRows(SHEET_ID, 20260708),
-        fetchTable(NATIONAL_SHEET_ID, 99300389, "A1:U3500", 1),
-        fetchTable(SALES_SHEET_ID, 0, "A2:AF4200", 1),
+        // Full CSV exports preserve hidden source rows. The GViz feed omits
+        // them, which made MTD and YTD collapse to the same visible-row total.
+        fetchCsvRows(NATIONAL_SHEET_ID, 99300389),
+        fetchCsvRows(SALES_SHEET_ID, 0),
         fetchTable(SHEET_ID, 852802817, "A2:X1609", 1),
         fetchTable(SHEET_ID, 1834454901, "A1:N974", 1),
       ]);
+      const nationalSalesRows = nationalOutbound.slice(1);
+      const wmsSalesRows = salesOutbound.slice(2);
       setItems([
         ...inboundItems(inbound, imports),
         ...inboundParcelItems(imports),
         ...outboundItems(outbound),
-        ...nationalOutboundItems(nationalOutbound),
-        ...salesOutboundItems(salesOutbound),
+        ...nationalOutboundItems(nationalSalesRows),
+        ...salesOutboundItems(wmsSalesRows),
       ]);
-      setKpis(buildKpis(warehouseTrucking, transfers, salesOutbound, nationalOutbound));
+      setKpis(buildKpis(warehouseTrucking, transfers, wmsSalesRows, nationalSalesRows));
       const refreshedAt = new Date();
       lastRefreshAt.current = refreshedAt.getTime();
       setUpdatedAt(refreshedAt);
