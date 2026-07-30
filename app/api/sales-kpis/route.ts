@@ -1,5 +1,6 @@
 const NATIONAL_SHEET_ID = "12Aty04yiLPPqz06AFDM8Y1Log2jEOqdXDqwiUV5yVX8";
 const WMS_SHEET_ID = "14lH9SQzTLj8MR7UbxMfkoTDDlzhPoE8CqHV3IpK450I";
+const LOGISTICS_SHEET_ID = "1M-vZ24Yw4ZN7R7b_473cVn8kny8DznTakSsD3VQsCzc";
 
 function parseCsv(text: string) {
   const rows: string[][] = [];
@@ -48,6 +49,23 @@ function dateCode(value: string) {
   return year * 10_000 + Number(match[1]) * 100 + Number(match[2]);
 }
 
+function freightDateCode(value: string, today: ReturnType<typeof pacificDateParts>) {
+  const full = dateCode(value);
+  if (full) return full;
+  const match = value.trim().match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (!match) return 0;
+  const month = Number(match[1]);
+  const day = Number(match[2]);
+  const todayTime = Date.UTC(today.year, today.month - 1, today.day);
+  const candidates = [today.year - 1, today.year, today.year + 1].map((year) => ({
+    code: year * 10_000 + month * 100 + day,
+    time: Date.UTC(year, month - 1, day),
+  }));
+  return candidates.reduce((best, candidate) =>
+    Math.abs(candidate.time - todayTime) < Math.abs(best.time - todayTime) ? candidate : best,
+  ).code;
+}
+
 function amount(value: string, allowSuffix: boolean) {
   const text = value.trim().toUpperCase().replace(/[$,\s]/g, "");
   const match = text.match(allowSuffix ? /^(-?\d+(?:\.\d+)?)([KMB])?$/ : /^(-?\d+(?:\.\d+)?)$/);
@@ -62,6 +80,41 @@ function amount(value: string, allowSuffix: boolean) {
           : 1;
   const parsed = Number(match[1]) * multiplier;
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function freightAmount(value: string) {
+  const text = value.trim().toUpperCase().replace(/\bUSD\b/g, "").trim();
+  if (!text || /[A-Z]/.test(text) || !/^[\s$,\d().-]+$/.test(text)) return 0;
+  const parsed = amount(text.replace(/[()]/g, ""), true) ?? 0;
+  return parsed > 0 && parsed <= 250_000 ? parsed : 0;
+}
+
+function loadType(value: string) {
+  const text = value.trim();
+  if (/\bFTL\b|FULL\s*TRUCK|TRUCKLOAD/i.test(text)) return "FTL" as const;
+  return Number(text.match(/\d+/)?.[0] ?? 0) >= 10 ? ("FTL" as const) : ("LTL" as const);
+}
+
+function distanceBand(destination: string) {
+  const text = destination.trim().toUpperCase();
+  if (!text) return "unknown" as const;
+  const localCity =
+    /\b(BUENA PARK|ANAHEIM|CERRITOS|LA MIRADA|FULLERTON|LA HABRA|BREA|ORANGE|SANTA ANA|IRVINE|COSTA MESA|HUNTINGTON BEACH|LONG BEACH|CARSON|TORRANCE|COMPTON|DOWNEY|NORWALK|WHITTIER|POMONA|ONTARIO|BLOOMINGTON|LOS ANGELES|GLENDALE|PASADENA)\b/;
+  const localZip =
+    /\b(90[0-8]\d{2}|91[0-2]\d{2}|917\d{2}|918\d{2}|92316|926\d{2}|927\d{2}|928\d{2})\b/;
+  if (localCity.test(text) || localZip.test(text)) return "local" as const;
+  if (/\bCA\b|CALIFORNIA/.test(text)) return "california" as const;
+  if (
+    /\b(AL|AK|AZ|AR|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b/.test(
+      text,
+    ) ||
+    /\b(NEW JERSEY|NEW YORK|WASHINGTON|TEXAS|ILLINOIS|FLORIDA|GEORGIA|PENNSYLVANIA|MASSACHUSETTS|ARIZONA|NEVADA|OREGON|COLORADO)\b/.test(
+      text,
+    )
+  ) {
+    return "out-of-state" as const;
+  }
+  return "unknown" as const;
 }
 
 function pacificDateParts() {
@@ -86,15 +139,17 @@ async function fullCsv(spreadsheetId: string, gid: number) {
   url.searchParams.set("gid", String(gid));
   url.searchParams.set("_", String(Date.now()));
   const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`Sales workbook read failed (${response.status}).`);
+  if (!response.ok) throw new Error(`KPI workbook read failed (${response.status}).`);
   return parseCsv(await response.text());
 }
 
 export async function GET() {
   try {
-    const [nationalRows, wmsRows] = await Promise.all([
+    const [nationalRows, wmsRows, truckingRows, transferRows] = await Promise.all([
       fullCsv(NATIONAL_SHEET_ID, 99300389),
       fullCsv(WMS_SHEET_ID, 0),
+      fullCsv(LOGISTICS_SHEET_ID, 852802817),
+      fullCsv(LOGISTICS_SHEET_ID, 1834454901),
     ]);
     const today = pacificDateParts();
     const yearStart = today.year * 10_000 + 101;
@@ -119,6 +174,62 @@ export async function GET() {
       records
         .filter((record) => record.date >= start)
         .reduce((total, record) => total + record.value, 0);
+    const trucking = truckingRows.slice(2).flatMap((row) => {
+      const date = freightDateCode(row[3] ?? "", today);
+      if (!date) return [];
+      return [{
+        date,
+        cost: freightAmount(row[21] ?? "") || freightAmount(row[17] ?? ""),
+        carrier: (row[16] ?? "").trim().replace(/\s+/g, " "),
+        destination: (row[2] ?? "").trim(),
+        loadType: loadType([row[4], row[5]].filter(Boolean).join(" ")),
+        isTransfer: false,
+      }];
+    });
+    const transfer = transferRows.slice(1).flatMap((row) => {
+      const date = freightDateCode(row[5] ?? "", today);
+      if (!date) return [];
+      return [{
+        date,
+        cost: freightAmount(row[9] ?? "") || freightAmount(row[8] ?? ""),
+        carrier: (row[6] ?? "").trim().replace(/\s+/g, " "),
+        destination: (row[4] ?? "").trim(),
+        loadType: loadType(row[1] ?? ""),
+        isTransfer: true,
+      }];
+    });
+    const freight = [...trucking, ...transfer].filter(
+      (record) => record.date >= yearStart && record.date <= today.code,
+    );
+    const freightMtd = freight.filter((record) => record.date >= monthStart);
+    const transferYtd = freight.filter((record) => record.isTransfer);
+    const transferMtd = freightMtd.filter((record) => record.isTransfer);
+    const carrierCounts = freight.reduce((counts, record) => {
+      if (!record.carrier) return counts;
+      const key = record.carrier.toUpperCase();
+      const current = counts.get(key) ?? { label: record.carrier, count: 0 };
+      current.count += 1;
+      counts.set(key, current);
+      return counts;
+    }, new Map<string, { label: string; count: number }>());
+    const topCarrier =
+      [...carrierCounts.values()].sort((a, b) => b.count - a.count)[0] ??
+      { label: "—", count: 0 };
+    const classified = freight.filter((record) => !record.isTransfer || record.cost > 0);
+    const ltl = classified.filter((record) => record.loadType === "LTL").length;
+    const ftl = classified.filter((record) => record.loadType === "FTL").length;
+    const splitTotal = ltl + ftl;
+    const average = (band: "local" | "california" | "out-of-state") => {
+      const matching = freight.filter(
+        (record) =>
+          !record.isTransfer &&
+          record.cost > 0 &&
+          distanceBand(record.destination) === band,
+      );
+      return matching.length
+        ? matching.reduce((total, record) => total + record.cost, 0) / matching.length
+        : 0;
+    };
 
     return Response.json(
       {
@@ -126,12 +237,23 @@ export async function GET() {
         nationalsSalesYtd: sum(nationalSales, yearStart),
         wmsSalesMtd: sum(wmsSales, monthStart),
         wmsSalesYtd: sum(wmsSales, yearStart),
+        shippingMtd: freightMtd.reduce((total, record) => total + record.cost, 0),
+        shippingYtd: freight.reduce((total, record) => total + record.cost, 0),
+        transfersMtd: transferMtd.reduce((total, record) => total + record.cost, 0),
+        transfersYtd: transferYtd.reduce((total, record) => total + record.cost, 0),
+        topCarrier: topCarrier.label,
+        topCarrierMoves: topCarrier.count,
+        ltlPercent: splitTotal ? Math.round((ltl / splitTotal) * 100) : 0,
+        ftlPercent: splitTotal ? Math.round((ftl / splitTotal) * 100) : 0,
+        avgLocal: average("local"),
+        avgCalifornia: average("california"),
+        avgOutOfState: average("out-of-state"),
       },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
     return Response.json(
-      { error: error instanceof Error ? error.message : "Sales KPI calculation failed." },
+      { error: error instanceof Error ? error.message : "KPI calculation failed." },
       { status: 502, headers: { "Cache-Control": "no-store" } },
     );
   }

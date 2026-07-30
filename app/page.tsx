@@ -61,15 +61,6 @@ type ScheduleItem = {
   department?: OutboundDepartment;
 };
 
-type CostRecord = {
-  date: Date;
-  cost: number;
-  carrier: string;
-  destination: string;
-  loadType: "LTL" | "FTL";
-  isTransfer: boolean;
-};
-
 type KpiSnapshot = {
   shippingMtd: number;
   shippingYtd: number;
@@ -160,11 +151,6 @@ function cell(row: any, index: number) {
   return clean(value?.f ?? value?.v ?? "");
 }
 
-function numericCell(row: any, index: number) {
-  const value = row?.c?.[index]?.v;
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
 function parseCsv(text: string) {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -246,17 +232,6 @@ function parseMoney(value: string) {
   return Number.isFinite(amount) ? amount : 0;
 }
 
-function parseFreightCost(value: string) {
-  const text = clean(value).toUpperCase().replace(/\bUSD\b/g, "").trim();
-  // Freight Invoice cells sometimes contain carrier invoice identifiers (for
-  // example 5648481B). Only currency-like values qualify as costs.
-  if (!text || /[A-Z]/.test(text) || !/^[\s$,\d().-]+$/.test(text)) return 0;
-  const amount = parseMoney(text);
-  // This guard rejects long all-numeric invoice IDs while retaining any
-  // plausible per-shipment freight charge in these ledgers.
-  return amount > 0 && amount <= 250_000 ? amount : 0;
-}
-
 function money(value: number) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -272,178 +247,6 @@ function moneyWithCents(value: number) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);
-}
-
-function loadType(value: string) {
-  const text = clean(value);
-  if (/\bFTL\b|FULL\s*TRUCK|TRUCKLOAD/i.test(text)) return "FTL" as const;
-  const palletCount = Number(text.match(/\d+/)?.[0] ?? 0);
-  return palletCount >= 10 ? ("FTL" as const) : ("LTL" as const);
-}
-
-function distanceBand(destination: string) {
-  const text = clean(destination).toUpperCase();
-  if (!text) return "unknown" as const;
-  const localCity =
-    /\b(BUENA PARK|ANAHEIM|CERRITOS|LA MIRADA|FULLERTON|LA HABRA|BREA|ORANGE|SANTA ANA|IRVINE|COSTA MESA|HUNTINGTON BEACH|LONG BEACH|CARSON|TORRANCE|COMPTON|DOWNEY|NORWALK|WHITTIER|POMONA|ONTARIO|BLOOMINGTON|LOS ANGELES|GLENDALE|PASADENA)\b/;
-  const localZip =
-    /\b(90[0-8]\d{2}|91[0-2]\d{2}|917\d{2}|918\d{2}|92316|926\d{2}|927\d{2}|928\d{2})\b/;
-  if (localCity.test(text) || localZip.test(text)) return "local";
-  if (/\bCA\b|CALIFORNIA/.test(text)) return "california";
-  // Do not turn an incomplete address, customer name, or other free text into
-  // an out-of-state shipment. A state code/name or a transfer location is
-  // required for that classification.
-  if (
-    /\b(AL|AK|AZ|AR|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b/.test(text) ||
-    /\b(NEW JERSEY|NEW YORK|WASHINGTON|TEXAS|ILLINOIS|FLORIDA|GEORGIA|PENNSYLVANIA|MASSACHUSETTS|ARIZONA|NEVADA|OREGON|COLORADO)\b/.test(text)
-  ) return "out-of-state";
-  return "unknown" as const;
-}
-
-function costRecord(
-  dateText: string,
-  invoiceValue: string,
-  rateValue: string,
-  carrier: string,
-  destination: string,
-  pallets: string,
-  isTransfer: boolean,
-) {
-  const date = parseDate(dateText);
-  if (!date) return null;
-  const invoiced = parseFreightCost(invoiceValue);
-  const rate = parseFreightCost(rateValue);
-  return {
-    date,
-    cost: invoiced || rate,
-    carrier: clean(carrier).replace(/\s+/g, " "),
-    destination: clean(destination),
-    loadType: loadType(pallets),
-    isTransfer,
-  } satisfies CostRecord;
-}
-
-function truckingCostRecords(table: any, invoiceIndex: number | null = 21) {
-  return (table.rows ?? []).flatMap((row: any) => {
-    const record = costRecord(
-      cell(row, 3),
-      invoiceIndex === null ? "" : cell(row, invoiceIndex),
-      cell(row, 17),
-      cell(row, 16),
-      cell(row, 2),
-      [cell(row, 4), cell(row, 5)].filter(Boolean).join(" "),
-      false,
-    );
-    return record ? [record] : [];
-  });
-}
-
-function transferCostRecords(table: any) {
-  return (table.rows ?? []).flatMap((row: any) => {
-    const record = costRecord(
-      cell(row, 5),
-      cell(row, 9),
-      cell(row, 8),
-      cell(row, 6),
-      cell(row, 4),
-      cell(row, 1),
-      true,
-    );
-    return record ? [record] : [];
-  });
-}
-
-function wmsInvoiceAmounts(table: any) {
-  return (table.rows ?? []).flatMap((row: any) => {
-    const date = parseDate(cell(row, 0));
-    const amount = numericCell(row, 6);
-    return date && amount !== null ? [{ date, amount }] : [];
-  });
-}
-
-function nationalOrderAmounts(table: any) {
-  return (table.rows ?? []).flatMap((row: any) => {
-    if (clean(cell(row, 0)).toLowerCase() === "cancelled") return [];
-    const date = parseDate(cell(row, 6));
-    const amount = parseMoney(cell(row, 4));
-    return date && amount > 0 ? [{ date, amount }] : [];
-  });
-}
-
-function buildKpis(
-  warehouseTrucking: any,
-  transfers: any,
-  sales: any,
-  national: any,
-): KpiSnapshot {
-  const today = startOfToday();
-  const isYtd = (date: Date) => date.getFullYear() === 2026 && date <= today;
-  const isMtd = (date: Date) =>
-    isYtd(date) && date.getMonth() === today.getMonth();
-  // WH Trucking Request is the complete outbound cost ledger, including
-  // hidden/completed rows. Do not add the derived Outbound Schedule again:
-  // it mirrors this ledger and would double-count the same shipment.
-  const costs = [
-    ...truckingCostRecords(warehouseTrucking),
-    ...transferCostRecords(transfers),
-  ];
-  const ytdCosts = costs.filter((record) => isYtd(record.date));
-  const mtdCosts = ytdCosts.filter((record) => isMtd(record.date));
-  const transferYtd = ytdCosts.filter((record) => record.isTransfer);
-  const transferMtd = mtdCosts.filter((record) => record.isTransfer);
-  const wmsSales = wmsInvoiceAmounts(sales);
-  const nationalSales = nationalOrderAmounts(national);
-  const wmsSalesYtd = wmsSales.filter((record) => isYtd(record.date));
-  const nationalSalesYtd = nationalSales.filter((record) => isYtd(record.date));
-  const carrierCounts = ytdCosts.reduce((counts, record) => {
-    if (!record.carrier) return counts;
-    const key = record.carrier.toUpperCase();
-    const current = counts.get(key) ?? { label: record.carrier, count: 0 };
-    current.count += 1;
-    counts.set(key, current);
-    return counts;
-  }, new Map<string, { label: string; count: number }>());
-  const topCarrier =
-    [...carrierCounts.values()].sort((a, b) => b.count - a.count)[0] ??
-    { label: "—", count: 0 };
-  const classified = ytdCosts.filter((record) => !record.isTransfer || record.cost > 0);
-  const ltl = classified.filter((record) => record.loadType === "LTL").length;
-  const ftl = classified.filter((record) => record.loadType === "FTL").length;
-  const splitTotal = ltl + ftl;
-  const average = (band: "local" | "california" | "out-of-state") => {
-    // Trucking averages describe outbound customer moves only. Transfers and
-    // records without a classifiable destination are intentionally excluded.
-    const matching = ytdCosts.filter(
-      (record) =>
-        !record.isTransfer &&
-        record.cost > 0 &&
-        distanceBand(record.destination) === band,
-    );
-    return matching.length
-      ? matching.reduce((sum, record) => sum + record.cost, 0) / matching.length
-      : 0;
-  };
-  return {
-    shippingMtd: mtdCosts.reduce((sum, record) => sum + record.cost, 0),
-    shippingYtd: ytdCosts.reduce((sum, record) => sum + record.cost, 0),
-    transfersMtd: transferMtd.reduce((sum, record) => sum + record.cost, 0),
-    transfersYtd: transferYtd.reduce((sum, record) => sum + record.cost, 0),
-    nationalsSalesMtd: nationalSalesYtd
-      .filter((record) => isMtd(record.date))
-      .reduce((sum, record) => sum + record.amount, 0),
-    nationalsSalesYtd: nationalSalesYtd.reduce((sum, record) => sum + record.amount, 0),
-    wmsSalesMtd: wmsSalesYtd
-      .filter((record) => isMtd(record.date))
-      .reduce((sum, record) => sum + record.amount, 0),
-    wmsSalesYtd: wmsSalesYtd.reduce((sum, record) => sum + record.amount, 0),
-    topCarrier: topCarrier.label,
-    topCarrierMoves: topCarrier.count,
-    ltlPercent: splitTotal ? Math.round((ltl / splitTotal) * 100) : 0,
-    ftlPercent: splitTotal ? Math.round((ftl / splitTotal) * 100) : 0,
-    avgLocal: average("local"),
-    avgCalifornia: average("california"),
-    avgOutOfState: average("out-of-state"),
-  };
 }
 
 function dayKey(date: Date) {
@@ -677,15 +480,10 @@ async function fetchCsvRows(spreadsheetId: string, gid: number) {
   return parseCsv(await response.text());
 }
 
-async function fetchSalesKpis() {
+async function fetchLiveKpis() {
   const response = await fetch("/api/sales-kpis", { cache: "no-store" });
-  if (!response.ok) throw new Error(`Sales KPI read failed (${response.status}).`);
-  return response.json() as Promise<
-    Pick<
-      KpiSnapshot,
-      "nationalsSalesMtd" | "nationalsSalesYtd" | "wmsSalesMtd" | "wmsSalesYtd"
-    >
-  >;
+  if (!response.ok) throw new Error(`KPI read failed (${response.status}).`);
+  return response.json() as Promise<KpiSnapshot>;
 }
 
 function normalizeStatus(value: string) {
@@ -1747,18 +1545,14 @@ export default function Home() {
         outbound,
         nationalOutbound,
         salesOutbound,
-        warehouseTrucking,
-        transfers,
-        salesKpis,
+        liveKpis,
       ] = await Promise.all([
         fetchTable(SHEET_ID, 2026070701, "A3:S1200", 1),
         fetchCsvRows(SHEET_ID, 1497250700),
         fetchCsvRows(SHEET_ID, 20260708),
         fetchTable(NATIONAL_SHEET_ID, 99300389, "A1:U3500", 1),
         fetchTable(SALES_SHEET_ID, 0, "A2:AF4200", 1),
-        fetchTable(SHEET_ID, 852802817, "A2:X1609", 1),
-        fetchTable(SHEET_ID, 1834454901, "A1:N974", 1),
-        fetchSalesKpis(),
+        fetchLiveKpis(),
       ]);
       setItems([
         ...inboundItems(inbound, imports),
@@ -1767,10 +1561,7 @@ export default function Home() {
         ...nationalOutboundItems(nationalOutbound),
         ...salesOutboundItems(salesOutbound),
       ]);
-      setKpis({
-        ...buildKpis(warehouseTrucking, transfers, salesOutbound, nationalOutbound),
-        ...salesKpis,
-      });
+      setKpis(liveKpis);
       const refreshedAt = new Date();
       lastRefreshAt.current = refreshedAt.getTime();
       setUpdatedAt(refreshedAt);

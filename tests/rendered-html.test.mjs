@@ -56,17 +56,11 @@ test("keeps the requested schedule order and KPI controls", async () => {
   assert.match(source, /TRANSFER SHIPPING/);
   assert.match(source, /AVG TRUCKING COST · YTD/);
   assert.match(source, /never shipment Invoice Amount/);
-  assert.match(source, /!record\.isTransfer/);
-  assert.match(source, /parseFreightCost/);
-  assert.match(source, /amount <= 250_000/);
   assert.match(source, /SALES_SNAPSHOT/);
   assert.match(source, /2_209_375\.46/);
   assert.match(source, /6_244_884\.52/);
   assert.match(source, /3_601_652\.95/);
   assert.match(source, /15_591_074\.08/);
-  assert.match(source, /numericCell/);
-  assert.match(source, /nationalOrderAmounts/);
-  assert.match(source, /wmsInvoiceAmounts/);
   assert.match(source, /INVOICE AMOUNT \(column G\)/);
   assert.match(source, /Order Date \(column G\)/);
   assert.match(source, /Date \(column A\)/);
@@ -80,11 +74,19 @@ test("keeps the requested schedule order and KPI controls", async () => {
   assert.doesNotMatch(source, /\.\.\.truckingCostRecords\(currentOutbound/);
 });
 
-test("uses the complete-ledger sales KPI endpoint", async () => {
+test("uses the complete-ledger KPI endpoint", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const route = await readFile(new URL("../app/api/sales-kpis/route.ts", import.meta.url), "utf8");
 
   assert.match(source, /fetch\("\/api\/sales-kpis"/);
-  assert.match(source, /\.\.\.salesKpis/);
+  assert.match(source, /setKpis\(liveKpis\)/);
+  assert.doesNotMatch(source, /fetchTable\(SHEET_ID, 852802817/);
+  assert.doesNotMatch(source, /fetchTable\(SHEET_ID, 1834454901/);
+  assert.match(route, /fullCsv\(LOGISTICS_SHEET_ID, 852802817\)/);
+  assert.match(route, /fullCsv\(LOGISTICS_SHEET_ID, 1834454901\)/);
+  assert.match(route, /freightAmount/);
+  assert.match(route, /parsed <= 250_000/);
+  assert.match(route, /!record\.isTransfer/);
 });
 
 test("calculates MTD and YTD from every source row", async () => {
@@ -110,6 +112,17 @@ test("calculates MTD and YTD from every source row", async () => {
   assert.equal(kpis.nationalsSalesYtd, 6_244_884.52);
   assert.ok(Math.abs(kpis.wmsSalesMtd - 3_601_652.95) < 0.001);
   assert.ok(Math.abs(kpis.wmsSalesYtd - 15_591_074.08) < 0.001);
+  assert.equal(typeof kpis.shippingMtd, "number");
+  assert.equal(typeof kpis.shippingYtd, "number");
+  assert.equal(typeof kpis.transfersMtd, "number");
+  assert.equal(typeof kpis.transfersYtd, "number");
+  assert.equal(typeof kpis.topCarrier, "string");
+  assert.equal(typeof kpis.topCarrierMoves, "number");
+  assert.ok(kpis.topCarrierMoves > 48);
+  assert.equal(kpis.ltlPercent + kpis.ftlPercent, 100);
+  assert.equal(typeof kpis.avgLocal, "number");
+  assert.equal(typeof kpis.avgCalifornia, "number");
+  assert.equal(typeof kpis.avgOutOfState, "number");
 });
 
 test("preserves physical Google Sheet rows for every editable write-back", async () => {
