@@ -237,7 +237,7 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
 
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1px;
   background: var(--line);
 }
@@ -1267,6 +1267,7 @@ body {
 .kpi-card:nth-child(1) { background: #fff4ed; }
 .kpi-card:nth-child(2) { background: #eef8f5; }
 .kpi-card:nth-child(3) { background: #f3f0fc; }
+.kpi-card:nth-child(4) { background: #eef3fb; }
 
 .kpi-method { background: #f6f8f8; }
 

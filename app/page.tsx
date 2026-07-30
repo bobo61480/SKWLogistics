@@ -11,8 +11,10 @@ const NATIONAL_SHEET_URL = `https://docs.google.com/spreadsheets/d/${NATIONAL_SH
 const SALES_SHEET_ID = "14lH9SQzTLj8MR7UbxMfkoTDDlzhPoE8CqHV3IpK450I";
 const SALES_SHEET_URL = `https://docs.google.com/spreadsheets/d/${SALES_SHEET_ID}/edit?gid=0#gid=0`;
 const SALES_SNAPSHOT = {
-  mtd: 3_147_082.37,
-  ytd: 15_136_503.5,
+  nationalsMtd: 2_209_375.46,
+  nationalsYtd: 6_244_884.52,
+  wmsMtd: 3_601_652.95,
+  wmsYtd: 15_591_074.08,
 };
 const WRITE_ENDPOINT = "/api/status";
 const AUTO_REFRESH_MS = 30 * 60 * 1000;
@@ -73,8 +75,10 @@ type KpiSnapshot = {
   shippingYtd: number;
   transfersMtd: number;
   transfersYtd: number;
-  salesMtd: number;
-  salesYtd: number;
+  nationalsSalesMtd: number;
+  nationalsSalesYtd: number;
+  wmsSalesMtd: number;
+  wmsSalesYtd: number;
   topCarrier: string;
   topCarrierMoves: number;
   ltlPercent: number;
@@ -89,8 +93,10 @@ const EMPTY_KPIS: KpiSnapshot = {
   shippingYtd: 0,
   transfersMtd: 0,
   transfersYtd: 0,
-  salesMtd: SALES_SNAPSHOT.mtd,
-  salesYtd: SALES_SNAPSHOT.ytd,
+  nationalsSalesMtd: SALES_SNAPSHOT.nationalsMtd,
+  nationalsSalesYtd: SALES_SNAPSHOT.nationalsYtd,
+  wmsSalesMtd: SALES_SNAPSHOT.wmsMtd,
+  wmsSalesYtd: SALES_SNAPSHOT.wmsYtd,
   topCarrier: "—",
   topCarrierMoves: 0,
   ltlPercent: 0,
@@ -152,6 +158,11 @@ function cell(row: any, index: number) {
   if (Array.isArray(row)) return clean(row[index]);
   const value = row?.c?.[index];
   return clean(value?.f ?? value?.v ?? "");
+}
+
+function numericCell(row: any, index: number) {
+  const value = row?.c?.[index]?.v;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function parseCsv(text: string) {
@@ -342,9 +353,28 @@ function transferCostRecords(table: any) {
   });
 }
 
+function wmsInvoiceAmounts(table: any) {
+  return (table.rows ?? []).flatMap((row: any) => {
+    const date = parseDate(cell(row, 0));
+    const amount = numericCell(row, 6);
+    return date && amount !== null ? [{ date, amount }] : [];
+  });
+}
+
+function nationalOrderAmounts(table: any) {
+  return (table.rows ?? []).flatMap((row: any) => {
+    if (clean(cell(row, 0)).toLowerCase() === "cancelled") return [];
+    const date = parseDate(cell(row, 6));
+    const amount = parseMoney(cell(row, 4));
+    return date && amount > 0 ? [{ date, amount }] : [];
+  });
+}
+
 function buildKpis(
   warehouseTrucking: any,
   transfers: any,
+  sales: any,
+  national: any,
 ): KpiSnapshot {
   const today = startOfToday();
   const isYtd = (date: Date) => date.getFullYear() === 2026 && date <= today;
@@ -361,6 +391,10 @@ function buildKpis(
   const mtdCosts = ytdCosts.filter((record) => isMtd(record.date));
   const transferYtd = ytdCosts.filter((record) => record.isTransfer);
   const transferMtd = mtdCosts.filter((record) => record.isTransfer);
+  const wmsSales = wmsInvoiceAmounts(sales);
+  const nationalSales = nationalOrderAmounts(national);
+  const wmsSalesYtd = wmsSales.filter((record) => isYtd(record.date));
+  const nationalSalesYtd = nationalSales.filter((record) => isYtd(record.date));
   const carrierCounts = ytdCosts.reduce((counts, record) => {
     if (!record.carrier) return counts;
     const key = record.carrier.toUpperCase();
@@ -394,9 +428,14 @@ function buildKpis(
     shippingYtd: ytdCosts.reduce((sum, record) => sum + record.cost, 0),
     transfersMtd: transferMtd.reduce((sum, record) => sum + record.cost, 0),
     transfersYtd: transferYtd.reduce((sum, record) => sum + record.cost, 0),
-    // Fixed, verified snapshot supplied for the July 29 reporting cut.
-    salesMtd: SALES_SNAPSHOT.mtd,
-    salesYtd: SALES_SNAPSHOT.ytd,
+    nationalsSalesMtd: nationalSalesYtd
+      .filter((record) => isMtd(record.date))
+      .reduce((sum, record) => sum + record.amount, 0),
+    nationalsSalesYtd: nationalSalesYtd.reduce((sum, record) => sum + record.amount, 0),
+    wmsSalesMtd: wmsSalesYtd
+      .filter((record) => isMtd(record.date))
+      .reduce((sum, record) => sum + record.amount, 0),
+    wmsSalesYtd: wmsSalesYtd.reduce((sum, record) => sum + record.amount, 0),
     topCarrier: topCarrier.label,
     topCarrierMoves: topCarrier.count,
     ltlPercent: splitTotal ? Math.round((ltl / splitTotal) * 100) : 0,
@@ -1715,7 +1754,7 @@ export default function Home() {
         ...nationalOutboundItems(nationalOutbound),
         ...salesOutboundItems(salesOutbound),
       ]);
-      setKpis(buildKpis(warehouseTrucking, transfers));
+      setKpis(buildKpis(warehouseTrucking, transfers, salesOutbound, nationalOutbound));
       const refreshedAt = new Date();
       lastRefreshAt.current = refreshedAt.getTime();
       setUpdatedAt(refreshedAt);
@@ -1957,9 +1996,14 @@ export default function Home() {
             <div><small>YTD</small><strong>{money(kpis.transfersYtd)}</strong></div>
           </article>
           <article className="kpi-card">
-            <span>SALES · STYLEKOREAN · AS OF JUL 29</span>
-            <div><small>MTD</small><strong>{moneyWithCents(kpis.salesMtd)}</strong></div>
-            <div><small>YTD</small><strong>{moneyWithCents(kpis.salesYtd)}</strong></div>
+            <span>SALES · NATIONALS</span>
+            <div><small>MTD</small><strong>{moneyWithCents(kpis.nationalsSalesMtd)}</strong></div>
+            <div><small>YTD</small><strong>{moneyWithCents(kpis.nationalsSalesYtd)}</strong></div>
+          </article>
+          <article className="kpi-card">
+            <span>SALES · WMS WHOLESALE</span>
+            <div><small>MTD</small><strong>{moneyWithCents(kpis.wmsSalesMtd)}</strong></div>
+            <div><small>YTD</small><strong>{moneyWithCents(kpis.wmsSalesYtd)}</strong></div>
           </article>
           <article className="kpi-card kpi-carrier">
             <span>TOP CARRIER · YTD</span>
@@ -1980,13 +2024,18 @@ export default function Home() {
         </div>
         <p className="kpi-method">
           All rows, including hidden/completed entries. Shipping costs use freight Invoice first,
-          then Rate when Invoice is blank—never shipment Invoice Amount. Sales as of July 29,
-          2026 use only the Stylekorean Date (column A) and numeric INVOICE AMOUNT (column G);
-          text entries such as “FREE SAMPLE” and “FOC” are excluded. Sales MTD covers July 1–29
-          and YTD covers January 1–July 29. Trucking averages exclude transfers and unclassified
-          destinations; local is within 50 miles of Buena Park.{" "}
+          then Rate when Invoice is blank—never shipment Invoice Amount. Nationals sales use
+          Order Date (column G) and Amount (column E), expand K values, and exclude cancelled
+          orders. WMS wholesale sales use Date (column A) and numeric INVOICE AMOUNT (column G);
+          text entries such as “FREE SAMPLE,” “FOC,” “Sample,” and operational notes are excluded.
+          MTD is the current month through today; YTD begins January 1, 2026. Trucking averages
+          exclude transfers and unclassified destinations; local is within 50 miles of Buena Park.{" "}
+          <a href={NATIONAL_SHEET_URL} target="_blank" rel="noreferrer">
+            Open Nationals source
+          </a>
+          {" · "}
           <a href={SALES_SHEET_URL} target="_blank" rel="noreferrer">
-            Open source spreadsheet
+            Open WMS source
           </a>
           .
         </p>
