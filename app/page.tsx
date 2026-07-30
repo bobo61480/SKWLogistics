@@ -14,8 +14,7 @@ const SALES_SNAPSHOT = {
   mtd: 3_147_082.37,
   ytd: 15_136_503.5,
 };
-const WRITE_ENDPOINT =
-  "https://script.google.com/a/macros/stylekoreanus.com/s/AKfycbwyVnU2jvOtMFXuY7KtX_8-hHXYVLrc6R2Dr_6akdDaTGQPc8duSo7tpguIuk00MjDl/exec";
+const WRITE_ENDPOINT = "/api/status";
 
 type Direction = "inbound" | "outbound";
 type OutboundDepartment = "Wholesale" | "B2B/E-Com" | "Nationals" | "MBX" | "NJ";
@@ -1201,32 +1200,20 @@ async function postStatus(item: ScheduleItem, status: string) {
     status,
   };
   const body = JSON.stringify(payload);
-  let submitted = false;
-  try {
-    const response = await fetch(WRITE_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body,
-    });
-    if (response.ok) {
-      const result = await response.json().catch(() => ({ ok: true }));
-      if (result?.ok === false) throw new Error(result.error || "The update was rejected.");
-      if (result?.row && Number(result.row) !== sourceRow) {
-        throw new Error("The update was rejected because the confirmed source row changed.");
-      }
-      submitted = true;
-    }
-  } catch (error) {
-    if (error instanceof Error && /rejected/i.test(error.message)) throw error;
-    // Domain-restricted Apps Script endpoints can reject a readable CORS response.
+  const response = await fetch(WRITE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  const result = await response.json().catch(() => null);
+  if (!response.ok || result?.ok === false) {
+    throw new Error(result?.error || "The source sheet rejected this status change.");
   }
-  if (!submitted) {
-    await fetch(WRITE_ENDPOINT, {
-      method: "POST",
-      mode: "no-cors",
-      headers: { "Content-Type": "text/plain" },
-      body,
-    });
+  if (!result || result.ok !== true) {
+    throw new Error("The source sheet returned an invalid confirmation.");
+  }
+  if (result.row && Number(result.row) !== sourceRow) {
+    throw new Error("The update was rejected because the confirmed source row changed.");
   }
 
   const expectedStatus = normalizeStatus(status);

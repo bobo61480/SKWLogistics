@@ -81,3 +81,14 @@ test("preserves physical Google Sheet rows for every editable write-back", async
   assert.doesNotMatch(source, /fetchTable\(SHEET_ID, 1497250700, "A1:AF1200", 1\)/);
   assert.doesNotMatch(source, /fetchTable\(SHEET_ID, 20260708, "A2:X1000", 0\)/);
 });
+
+test("routes status writes through the site and preserves POST redirects", async () => {
+  const pageSource = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const workerSource = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+  assert.match(pageSource, /const WRITE_ENDPOINT = "\/api\/status"/);
+  assert.doesNotMatch(pageSource, /mode: "no-cors"/);
+  assert.match(workerSource, /url\.pathname === "\/api\/status"/);
+  assert.match(workerSource, /redirect: "manual"/);
+  assert.match(workerSource, /await upstreamRequest\(new URL\(location/);
+  assert.match(workerSource, /result\?\.ok !== true/);
+});
