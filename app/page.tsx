@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { INBOUND_DOCUMENT_LINKS } from "./inbound-links";
 import { INBOUND_INVOICE_LINKS } from "./inbound-invoice-links";
 
@@ -15,6 +15,7 @@ const SALES_SNAPSHOT = {
   ytd: 15_136_503.5,
 };
 const WRITE_ENDPOINT = "/api/status";
+const AUTO_REFRESH_MS = 30 * 60 * 1000;
 
 type Direction = "inbound" | "outbound";
 type OutboundDepartment = "Wholesale" | "B2B/E-Com" | "Nationals" | "MBX" | "NJ";
@@ -621,6 +622,7 @@ async function fetchTable(
   url.searchParams.set("gid", String(gid));
   url.searchParams.set("range", range);
   url.searchParams.set("headers", String(headers));
+  url.searchParams.set("_", String(Date.now()));
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) throw new Error(`Workbook read failed (${response.status}).`);
   return parseGviz(await response.text());
@@ -630,6 +632,7 @@ async function fetchCsvRows(spreadsheetId: string, gid: number) {
   const url = new URL(`https://docs.google.com/spreadsheets/d/${spreadsheetId}/export`);
   url.searchParams.set("format", "csv");
   url.searchParams.set("gid", String(gid));
+  url.searchParams.set("_", String(Date.now()));
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) throw new Error(`Workbook read failed (${response.status}).`);
   return parseCsv(await response.text());
@@ -1594,11 +1597,14 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const [nextRefreshAt, setNextRefreshAt] = useState<Date | null>(null);
   const [query, setQuery] = useState("");
   const [includeFinished, setIncludeFinished] = useState(false);
   const [savingId, setSavingId] = useState("");
   const [notice, setNotice] = useState("");
   const [kpis, setKpis] = useState<KpiSnapshot>(EMPTY_KPIS);
+  const loadInFlight = useRef(false);
+  const lastRefreshAt = useRef(0);
 
   const days = useMemo(() => {
     const today = startOfToday();
@@ -1610,6 +1616,8 @@ export default function Home() {
   }, []);
 
   const load = useCallback(async () => {
+    if (loadInFlight.current) return;
+    loadInFlight.current = true;
     setLoading(true);
     setError("");
     try {
@@ -1637,18 +1645,40 @@ export default function Home() {
         ...salesOutboundItems(salesOutbound),
       ]);
       setKpis(buildKpis(warehouseTrucking, transfers));
-      setUpdatedAt(new Date());
+      const refreshedAt = new Date();
+      lastRefreshAt.current = refreshedAt.getTime();
+      setUpdatedAt(refreshedAt);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "The live schedule could not be loaded.");
     } finally {
+      loadInFlight.current = false;
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     load();
-    const timer = window.setInterval(load, 10 * 60 * 1000);
-    return () => window.clearInterval(timer);
+    setNextRefreshAt(new Date(Date.now() + AUTO_REFRESH_MS));
+    const refreshIfStale = () => {
+      if (
+        document.visibilityState === "visible" &&
+        Date.now() - lastRefreshAt.current >= AUTO_REFRESH_MS
+      ) {
+        load();
+        setNextRefreshAt(new Date(Date.now() + AUTO_REFRESH_MS));
+      }
+    };
+    const timer = window.setInterval(() => {
+      load();
+      setNextRefreshAt(new Date(Date.now() + AUTO_REFRESH_MS));
+    }, AUTO_REFRESH_MS);
+    document.addEventListener("visibilitychange", refreshIfStale);
+    window.addEventListener("focus", refreshIfStale);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshIfStale);
+      window.removeEventListener("focus", refreshIfStale);
+    };
   }, [load]);
 
   const visibleItems = useMemo(() => {
@@ -1800,7 +1830,8 @@ export default function Home() {
             {error ? "Workbook connection needs attention" : loading ? "Syncing live records…" : "3 live workbooks connected"}
           </span>
           <span className="mono">
-            LAST SYNC {updatedAt ? updatedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "America/Los_Angeles" }) : "—"}
+            AUTO SYNC 30 MIN · LAST SYNC {updatedAt ? updatedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "America/Los_Angeles" }) : "—"}
+            {" · "}NEXT CHECK {nextRefreshAt ? nextRefreshAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "America/Los_Angeles" }) : "—"}
           </span>
         </div>
       </header>
@@ -1976,7 +2007,7 @@ export default function Home() {
 
       <footer>
         <p><strong>SK</strong> STYLEKOREAN LOGISTICS · COMPANY OPERATIONS</p>
-        <p className="mono">AUTO-REFRESH 10 MIN · STATUS EDITS SYNC TO SOURCE ROWS</p>
+        <p className="mono">AUTO-REFRESH 30 MIN · STATUS EDITS SYNC TO SOURCE ROWS</p>
       </footer>
 
       {notice && <div className="toast" role="status">{notice}</div>}
