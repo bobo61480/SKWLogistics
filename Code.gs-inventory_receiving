@@ -1,0 +1,853 @@
+// --- [RECOMM-LOC] 함수의 전역 변수를 사용하여 시트 데이터를 캐싱 (API 호출 최소화) ---
+var _availDataCache = null;
+var _locHeightMap = null;
+
+
+function onEdit(e) {
+  removeComma(e);
+}
+
+
+function updateBoxQtyBatch() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (ss.getName() !== "2026 재고 노출 현황") {
+    SpreadsheetApp.getUi().alert("2026 재고 노출 현황 파일에서만 실행 가능합니다.");
+    return;
+  }
+
+  // 🔹 CON-NUM!G1 에서 sourceGid 읽기
+  const configTab = ss.getSheetByName("CON-NUM");
+  const sourceGid = Number(configTab.getRange("G1").getValue());
+
+  if (!Number.isInteger(sourceGid)) {
+    SpreadsheetApp.getUi().alert("CON-NUM!G1 에 유효한 숫자 gid 값이 없습니다.");
+    return;
+  }
+
+  // 🔹 gid 정확 일치 시트 찾기
+  const sourceTab = ss.getSheets().find(sh => sh.getSheetId() === sourceGid);
+
+  if (!sourceTab) {
+    SpreadsheetApp.getUi().alert(
+      `CON-NUM!G1 의 gid(${sourceGid}) 와 정확히 일치하는 탭이 없습니다.`
+    );
+    return;
+  }
+
+  const sourceLastRow = sourceTab.getLastRow();
+  if (sourceLastRow < 2) return;
+
+  // 🔹 A~P (16컬럼) 읽기 (O=14, P=15)
+  const sourceData = sourceTab.getRange(2, 1, sourceLastRow - 1, 16).getValues();
+
+  const normalizeSku = sku =>
+    String(sku || "").replace(/[\s\r\n\t]+/g, "").trim();
+
+  const updateArray = sourceData
+    .filter(row => Number(row[14]) > 0) // O 컬럼 QTY
+    .map(row => ({
+      sku: normalizeSku(row[0]),
+      boxQty: Number(row[14]),
+      boxDim: row[15] || "" // P 컬럼 DIM
+    }));
+
+  if (updateArray.length === 0) {
+    SpreadsheetApp.getUi().alert("업데이트할 O 컬럼에 0 보다 큰 항목이 없습니다.");
+    return;
+  }
+
+  // 🔹 TARGET
+  const TARGET_SPREADSHEET_ID = "1_kZm34SavTpnsaq4HXxFx-v3o7krywKxbU3XaAeCIUA";
+  const targetSS = SpreadsheetApp.openById(TARGET_SPREADSHEET_ID);
+  const targetTab = targetSS.getSheetByName("BOX-QTY-PER-SKU");
+
+  // 🔹 QTY 카운트
+  let qtyUpdate = 0;
+  let qtyInsert = 0;
+  let qtySkip = 0;
+
+  // 🔹 DIM 카운트
+  let dimUpdate = 0;
+  //let dimUpdateSkus = "";
+  let dimInsert = 0;
+  let dimSkip = 0;
+
+  updateArray.forEach(({ sku, boxQty, boxDim }) => {
+    const finder = targetTab
+      .getRange("A:A")
+      .createTextFinder(sku)
+      .matchEntireCell(true)
+      .findNext();
+
+    if (finder) {
+      const row = finder.getRow();
+
+      // ===== BOX QTY 처리 (D컬럼) =====
+      const currentQty = targetTab.getRange(row, 4).getValue();
+      if (Number(currentQty) !== Number(boxQty)) {
+        targetTab.getRange(row, 4).setValue(boxQty);
+        qtyUpdate++;
+      } else {
+        qtySkip++;
+      }
+
+      // ===== BOX DIM 처리 (E컬럼) =====
+      const currentDim = targetTab.getRange(row, 5).getValue();
+      const cleanBoxDim = String(boxDim).trim();
+      
+      if (cleanBoxDim !== "") { // 공백이 아닐 때만 값 비교 및 업데이트
+        if (String(currentDim).trim() !== cleanBoxDim) {
+          targetTab.getRange(row, 5).setValue(boxDim);
+          dimUpdate++;
+          //dimUpdateSkus = dimUpdateSkus + "," + sku;
+        } else {
+          dimSkip++;
+        }
+      } else {
+        dimSkip++;
+      }
+
+    } else {
+      // 🔹 SKU 없음 → 신규 추가
+      const lastRow = targetTab.getLastRow() + 1;
+
+      targetTab.getRange(lastRow, 1, 1, 5).setValues([[ 
+        sku,      // A
+        "Y",      // B
+        0,        // C
+        boxQty,   // D
+        boxDim    // E
+      ]]);
+
+      qtyInsert++;
+      dimInsert++;
+    }
+  });
+
+  SpreadsheetApp.getUi().alert(
+    `BOX QTY 처리 완료\n` +
+    `업데이트: ${qtyUpdate}건\n` +
+    `신규 추가: ${qtyInsert}건\n` +
+    `변경 없음: ${qtySkip}건\n` +
+    `\nBOX DIM 처리 완료\n` +
+    `업데이트: ${dimUpdate}건\n` +
+    `신규 추가: ${dimInsert}건\n` +
+    `변경 없음: ${dimSkip}건`
+  );
+}
+
+
+
+function updateBoxDim() {
+
+  const sourceSS = SpreadsheetApp.getActiveSpreadsheet();
+  const sourceSheet = sourceSS.getSheetByName("Box-Info-Update");
+
+  const targetSS = SpreadsheetApp.openById("1_kZm34SavTpnsaq4HXxFx-v3o7krywKxbU3XaAeCIUA");
+  const targetSheet = targetSS.getSheetByName("BOX-QTY-PER-SKU");
+
+  // SOURCE : A3:F
+  const sourceLastRow = sourceSheet.getLastRow();
+  if (sourceLastRow < 3) {
+    SpreadsheetApp.getUi().alert("Box-Info-Update 시트에 데이터가 없습니다.");
+    return;
+  }
+
+  const sourceData = sourceSheet.getRange(3, 1, sourceLastRow - 2, 6).getValues(); // A~F
+
+  // TARGET
+  const targetLastRow = targetSheet.getLastRow();
+  const targetData = targetLastRow > 1
+    ? targetSheet.getRange(2, 1, targetLastRow - 1, 5).getValues()
+    : [];
+
+  // SKU → 배열 index
+  const skuMap = {};
+  targetData.forEach((row, i) => {
+    const sku = String(row[0]).trim();
+    if (sku) {
+      skuMap[sku] = i;
+    }
+  });
+
+  let nNewCount = 0;
+  let nBoxDimCount = 0;
+  let nOuterQtyBoxCount = 0;
+
+  const appendRows = [];
+
+  sourceData.forEach(row => {
+
+    const sku = String(row[0]).trim();
+    const dim = row[3];             // D
+    const outerQty = row[5];        // F
+
+    if (!sku) return;
+
+    const idx = skuMap[sku];
+
+    if (idx !== undefined) {
+
+      // ===== Outer Qty 업데이트 =====
+      const srcOuterQty = parseInt(outerQty, 10);
+      const tgtOuterQty = parseInt(targetData[idx][3], 10);
+
+      if (
+        Number.isInteger(srcOuterQty) &&
+        srcOuterQty > 0 &&
+        srcOuterQty !== tgtOuterQty
+      ) {
+        targetData[idx][3] = srcOuterQty;
+        nOuterQtyBoxCount++;
+      }
+
+      // ===== DIM 업데이트 =====
+      if (
+        dim !== null &&
+        dim !== "" &&
+        String(dim).trim() !== "" &&
+        String(targetData[idx][4]).trim() !== String(dim).trim()
+      ) {
+        targetData[idx][4] = dim;
+        nBoxDimCount++;
+      }
+
+    } else {
+
+      // ===== 신규 추가 =====
+      appendRows.push([
+        sku,
+        "Y",
+        0,
+        (parseInt(outerQty, 10) > 0 ? parseInt(outerQty, 10) : 0),
+        dim
+      ]);
+
+      nNewCount++;
+    }
+
+  });
+
+  // 기존 데이터 저장
+  if (targetData.length > 0) {
+    targetSheet.getRange(2, 1, targetData.length, 5).setValues(targetData);
+  }
+
+  // 신규 추가
+  if (appendRows.length > 0) {
+    targetSheet
+      .getRange(targetSheet.getLastRow() + 1, 1, appendRows.length, 5)
+      .setValues(appendRows);
+  }
+
+  SpreadsheetApp.getUi().alert(
+    "신규 추가 : " + nNewCount + " 건\n" +
+    "BOX DIM : " + nBoxDimCount + " 건\n" +
+    "Outer Qty per Box : " + nOuterQtyBoxCount + " 건"
+  );
+
+}
+
+
+function updateBoxQty() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  if (ss.getName() !== "2026 재고 노출 현황") {
+    SpreadsheetApp.getUi().alert("2026 재고 노출 현황 파일에서만 실행 가능합니다.");
+    return;
+  }
+
+  // 🔹 소스: "2026 재고 노출 현황" 시트의 ACTIVE 탭
+  //const sourceSheet = ss.getSheetByName("2026 재고 노출 현황");
+  //const sourceTab = ss.getActiveSheet();
+  const sourceTab = ss.getSheetByName("TW 3차");
+  const sourceLastRow = sourceTab.getLastRow();
+  if (sourceLastRow < 2) return;
+
+  // 🔹 TARGET 스프레드시트
+  const TARGET_SPREADSHEET_ID = "1_kZm34SavTpnsaq4HXxFx-v3o7krywKxbU3XaAeCIUA";
+  const targetSS = SpreadsheetApp.openById(TARGET_SPREADSHEET_ID);
+  const targetTab = targetSS.getSheetByName("CMS-SKU-LIST");
+  if (!targetTab) {
+    SpreadsheetApp.getUi().alert("CMS-SKU-LIST 탭을 찾을 수 없습니다.");
+    return;
+  }
+
+  const targetLastRow = targetTab.getLastRow();
+  if (targetLastRow < 2) return;
+
+  // 🔹 데이터 읽기
+  const sourceData = sourceTab.getRange(2, 1, sourceLastRow - 1, 17).getValues();
+  //const targetData = targetTab.getRange(2, 1, targetLastRow - 1, 7).getValues();
+
+  // 🔹 SKU 정규화 함수
+  const normalizeSku = sku => String(sku || "").replace(/[\s\r\n\t]+/g, "").trim();
+
+  // 🔹 Q>0인 source SKU만 배열로 저장
+  const updateArray = [];
+  sourceData.forEach(row => {
+    const sku = normalizeSku(row[0]);
+    const boxQty = Number(row[16]) || 0;
+    if (sku && boxQty > 0) {
+      updateArray.push({ sku, boxQty });
+    }
+  });
+
+  console.log("Q>0 SKU count:", updateArray.length);
+
+  if (updateArray.length === 0) {
+    SpreadsheetApp.getUi().alert("업데이트할 Q>0 항목이 없습니다.");
+    return;
+  }
+
+  const BATCH_SIZE = 1000; // 한 번에 처리할 행 수
+
+  let updateCount = 0;
+
+  for (let startRow = 2; startRow <= targetLastRow; startRow += BATCH_SIZE) {
+    const numRows = Math.min(BATCH_SIZE, targetLastRow - startRow + 1);
+    const targetData = targetTab.getRange(startRow, 1, numRows, 7).getValues();
+
+    // SKU → 인덱스 맵
+    const targetMap = {};
+    targetData.forEach((row, idx) => {
+      const sku = normalizeSku(row[0]);
+      if (sku) targetMap[sku] = idx;
+    });
+
+    // updateArray에 포함된 SKU만 처리
+    updateArray.forEach(item => {
+      const { sku, boxQty } = item;
+      if (targetMap.hasOwnProperty(sku)) {
+        const idx = targetMap[sku];
+        targetData[idx][6] = boxQty;
+        updateCount++;
+      }
+    });
+
+    // 블록 단위 반영
+    targetTab.getRange(startRow, 1, numRows, 7).setValues(targetData);
+  }
+
+  SpreadsheetApp.getUi().alert(`BOX QTY 업데이트 완료\n총 업데이트: ${updateCount}건`);
+}
+
+function removeComma(e) {
+  /*
+  if (!e || !e.range) return;
+
+  const range = e.range;
+  const sheet = range.getSheet();
+
+  // 시트 이름 체크
+  if (sheet.getName() !== "벌.트") return;
+
+  // B열, 7행 이상만 처리
+  if (range.getColumn() !== 2 || range.getRow() < 7) return;
+
+  const displayValue = range.getDisplayValue();
+  if (displayValue === "" || displayValue === null) return;
+
+  const newValue = displayValue.toString().replace(/,/g, "");
+
+  // 무한 루프 방지
+  if (newValue !== displayValue.toString()) {
+    range.setValue(newValue);
+  }
+  */
+
+  const r = e.range;
+  const s = r.getSheet();
+
+  if (s.getName() !== "벌.트") return;
+  if (r.getColumn() !== 2 || r.getRow() < 6) return;
+
+  r.setNumberFormat("0"); // 콤마 없는 숫자 형식
+}
+
+
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu("SKU Helper")
+    .addItem("선택 SKU CMS 입력", "sendSelectedSkuToCms")
+    .addToUi();
+}
+
+function sendSelectedSkuToCms() {
+  const sheet = SpreadsheetApp.getActiveSheet();
+  const sheetName = sheet.getName();
+
+  const range = sheet.getActiveRange();
+  if (!range) {
+    SpreadsheetApp.getUi().alert("셀을 선택 후 사용하세요.");
+    return;
+  }
+
+  const sku = range.getValue()?.toString().trim();
+  if (!sku) {
+    SpreadsheetApp.getUi().alert("SKU 셀을 선택 후 사용하세요.");
+    return;
+  }
+
+  const webAppUrl = "https://script.google.com/macros/s/AKfycbzPH5Pu-tZvcwEOyROSn-n0rpJbX9f1I2Z42eJ6Q1F-dGjMYIO_zjHQqmbkUkKxLd9-/exec";
+
+  const url = webAppUrl + "?sku=" + encodeURIComponent(sku) + "&sheet=" + encodeURIComponent(sheetName);
+
+  try {
+    const response = UrlFetchApp.fetch(url);
+    const result = JSON.parse(response.getContentText());
+
+    if (!result || result.error) {
+      SpreadsheetApp.getUi().alert(result?.error || "데이터 조회 오류");
+      return;
+    }
+
+    
+    SpreadsheetApp.getUi().alert(
+      "SKU: " + result.sku +
+      "\nQTY: " + result.qty +
+      "\nUPC: " + result.upc +
+      "\nLOCATION: " + result.location
+    );
+    
+
+    // 다음 단계용 로그 (중요)
+    console.log(JSON.stringify({
+      sku: result.sku,
+      location: result.location
+    }));
+  } catch (e) {
+    SpreadsheetApp.getUi().alert("Web App 호출 중 오류 발생: " + e.message);
+  }
+}
+
+
+
+
+/*
+----- RECOMM_LOCATION 함수 관련 시작
+
+*/
+
+
+// '사용가능 로케이션' 시트 데이터를 한 번만 불러와서 캐싱하는 함수
+function getAvailData() {
+  if (!_availDataCache) {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName("사용가능 로케이션");
+    if (sheet) {
+      var lastRow = Math.max(2, sheet.getLastRow());
+      _availDataCache = sheet.getRange("A2:B" + lastRow).getValues();
+    } else {
+      _availDataCache = [];
+    }
+  }
+  return _availDataCache;
+}
+
+// 'Num-of-Items' 시트 데이터를 한 번만 불러와서 빠른 검색(Map) 형태로 캐싱하는 함수
+function getLocHeightMap() {
+  if (!_locHeightMap) {
+    _locHeightMap = {};
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName("Num-of-Items");
+    if (sheet) {
+      var lastRow = Math.max(2, sheet.getLastRow());
+      var data = sheet.getRange("B2:C" + lastRow).getValues();
+      for (var i = 0; i < data.length; i++) {
+        if (data[i][0]) {
+          _locHeightMap[data[i][0]] = Number(data[i][1]);
+        }
+      }
+    }
+  }
+  return _locHeightMap;
+}
+
+function RECOMM_LOCATION(dInboundQty, mCurrLocs, nQty, boxQty, boxSize) {
+  try {
+    var location = "";
+    var totalStock = 0;
+    var useRecommended = false;
+
+    // --- 0. 공백 체크 및 안전한 문자열 변환 ---
+    if (!mCurrLocs || String(mCurrLocs).trim() === "") return "";
+
+    // --- 0. 숫자 강제 변환 (NaN 방지) ---
+    dInboundQty = Number(dInboundQty);
+    nQty = Number(nQty);
+    boxQty = Number(boxQty);
+    if (isNaN(dInboundQty) || isNaN(nQty) || isNaN(boxQty)) return "숫자 데이터 오류";
+
+    // --- 1. 현재 로케이션 확인 ---
+    var lines = String(mCurrLocs).split("\n").filter(function(l) { return l.trim() !== ""; });
+    if (lines.length > 0) {
+      var locs = [];
+      for (var i = 0; i < lines.length; i++) {
+        var parts = lines[i].split("/");
+        if (parts.length < 3) continue;
+        var loc = parts[0].trim();
+        var qty = Number(parts[2].trim());
+        if (!isNaN(qty)) {
+          locs.push(loc);
+          totalStock += qty;
+        }
+      }
+      var uniqueLocs = [...new Set(locs)];
+      if (uniqueLocs.length === 1) {
+        location = uniqueLocs[0];
+      } else {
+        return "다중 LOCATION";
+      }
+    } else {
+      useRecommended = true;
+    }
+
+    // --- 2. 사용가능 로케이션 시트 데이터 (캐시에서 즉시 로드) ---
+    var availData = getAvailData();
+    if (!availData || availData.length === 0) return "사용가능 로케이션 시트 없음";
+
+    // --- 3. 추천 로케이션 ---
+    if (useRecommended) {
+      if (!boxSize || String(boxSize).trim() === "") return "";
+      var boxWidthTemp = Number(String(boxSize).split("*")[0]);
+      var minDiff = Infinity;
+      for (var i = 0; i < availData.length; i++) {
+        if (!availData[i][0]) continue;
+        var width = Number(availData[i][1]);
+        if (isNaN(width)) continue;
+        if (width >= boxWidthTemp && (width - boxWidthTemp) < minDiff) {
+          minDiff = width - boxWidthTemp;
+          location = availData[i][0];
+        }
+      }
+      if (!location) return "추천 LOC 없음";
+    }
+
+    if (!boxSize || String(boxSize).trim() === "") return location;
+
+    // --- 4. 박스 사이즈 ---
+    var boxDims = String(boxSize).split("*").map(Number);
+    if (boxDims.length !== 3 || boxDims.some(isNaN)) return "박스 사이즈 오류";
+    var boxWidth = boxDims[0], boxLength = boxDims[1], boxHeight = boxDims[2];
+
+    // --- 5. 로케이션 높이 (캐시된 Map 객체에서 for문 없이 즉시 찾기) ---
+    var locHeightMap = getLocHeightMap();
+    var locHeight = locHeightMap[location];
+    
+    if (!locHeight || isNaN(locHeight)) return "로케이션 높이 없음";
+    var palletHeight = locHeight - 6;
+
+    // --- 6. width ---
+    var availWidth = null;
+    for (var i = 0; i < availData.length; i++) {
+      if (availData[i][0] === location) {
+        availWidth = Number(availData[i][1]);
+        break;
+      }
+    }
+    if (!availWidth || isNaN(availWidth)) availWidth = boxWidth;
+
+    // --- 7. pallet 고정 값 ---
+    var palletLength = 43;
+    var palletWidth = 43;
+
+    // --- 8. 레이어 계산 ---
+    var boxesPerRowWidth = Math.floor(palletWidth / boxWidth);
+    var boxesPerRowLength = Math.floor((palletLength + 2) / boxLength);
+    var boxesPerLayer = boxesPerRowWidth * boxesPerRowLength;
+    if (boxesPerLayer <= 0) return "적재 불가";
+
+    // --- 9. 기존 재고 기준 ---
+    var currentBoxes = Math.ceil(totalStock / boxQty);
+    var currentLayers = Math.ceil(currentBoxes / boxesPerLayer);
+    var usedHeight = currentLayers * boxHeight;
+
+    // --- 10. 추가 가능 레이어 ---
+    var remainHeight = palletHeight - usedHeight;
+    var addLayers = Math.floor(remainHeight / boxHeight);
+
+    if (addLayers <= 0) {
+      var remainQty = Math.max(dInboundQty, 0);
+      return "공간부족\n현재: " + currentBoxes + " box, " + remainQty + " ea";
+    }
+
+    // --- 11. 한 팔렛 1 라인 정책 ---
+    var maxAddBoxes = addLayers * boxesPerRowLength;
+    var moveBoxes = Math.min(maxAddBoxes, Math.ceil(dInboundQty / boxQty));
+    var moveQty = Math.min(moveBoxes * boxQty, dInboundQty);
+    var remainingQty = dInboundQty - moveQty;
+
+    // --- 결과 ---
+    return location + "\n이동 가능수량: " + moveQty + "ea (" + moveBoxes + ")" +
+           "\n남는 수량: " + remainingQty + "ea";
+
+  } catch (e) {
+    return "계산 오류: " + e.message;
+  }
+}
+
+
+
+function RECOMM_LOCATION_2(dInboundQty, mCurrLocs, nQty, boxQty, boxSize) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var location = "";
+    var totalStock = 0;
+    var useRecommended = false;
+
+    // --- 0. mCurrLocs 공백 체크 ---
+    if (!mCurrLocs || mCurrLocs.toString().trim() === "") return "";
+
+    // --- 0. 숫자 강제 변환 (NaN 방지) ---
+    dInboundQty = Number(dInboundQty);
+    nQty = Number(nQty);
+    boxQty = Number(boxQty);
+    if (isNaN(dInboundQty) || isNaN(nQty) || isNaN(boxQty)) return "숫자 데이터 오류";
+
+    // --- 1. 현재 로케이션 확인 ---
+    var lines = mCurrLocs.toString().split("\n").filter(l => l.trim() !== "");
+    if (lines.length > 0) {
+      var locs = [];
+      for (var i = 0; i < lines.length; i++) {
+        var parts = lines[i].split("/");
+        if (parts.length < 3) continue;
+        var loc = parts[0].trim();
+        var qty = Number(parts[2].trim());
+        if (!isNaN(qty)) {
+          locs.push(loc);
+          totalStock += qty;
+        }
+      }
+      var uniqueLocs = [...new Set(locs)];
+      if (uniqueLocs.length === 1) location = uniqueLocs[0];
+      else return "다중 LOCATION";  // 공백 대신 메시지
+    } else {
+      useRecommended = true;
+    }
+
+    // --- 2. 사용가능 로케이션 시트 ---
+    var availSheet = ss.getSheetByName("사용가능 로케이션");
+    if (!availSheet) return "사용가능 로케이션 시트 없음";
+    var availData = availSheet.getRange("A2:B" + availSheet.getLastRow()).getValues();
+
+    // --- 3. 추천 로케이션 ---
+    if (useRecommended) {
+      if (!boxSize || boxSize.toString().trim() === "") return "";
+      var boxWidthTemp = Number(boxSize.toString().split("*")[0]);
+      var minDiff = Infinity;
+      for (var i = 0; i < availData.length; i++) {
+        if (!availData[i][0]) continue;
+        var width = Number(availData[i][1]);
+        if (isNaN(width)) continue;
+        if (width >= boxWidthTemp && (width - boxWidthTemp) < minDiff) {
+          minDiff = width - boxWidthTemp;
+          location = availData[i][0];
+        }
+      }
+      if (!location) return "추천 LOC 없음";
+    }
+
+    if (!boxSize || boxSize.toString().trim() === "") return location;
+
+    // --- 4. 박스 사이즈 ---
+    var boxDims = boxSize.toString().split("*").map(Number);
+    if (boxDims.length !== 3 || boxDims.some(isNaN)) return "박스 사이즈 오류";
+    var boxWidth = boxDims[0], boxLength = boxDims[1], boxHeight = boxDims[2];
+
+    // --- 5. 로케이션 높이 ---
+    var numSheet = ss.getSheetByName("Num-of-Items");
+    if (!numSheet) return "Num-of-Items 시트 없음";
+    var locsData = numSheet.getRange("B2:C" + numSheet.getLastRow()).getValues();
+    var locHeight = null;
+    for (var i = 0; i < locsData.length; i++) {
+      if (locsData[i][0] === location) {
+        locHeight = Number(locsData[i][1]);
+        break;
+      }
+    }
+    if (!locHeight || isNaN(locHeight)) return "로케이션 높이 없음";
+    var palletHeight = locHeight - 6;
+
+    // --- 6. width ---
+    var availWidth = null;
+    for (var i = 0; i < availData.length; i++) {
+      if (availData[i][0] === location) {
+        availWidth = Number(availData[i][1]);
+        break;
+      }
+    }
+    if (!availWidth || isNaN(availWidth)) availWidth = boxWidth;
+
+    // --- 7. pallet 고정 값 ---
+    var palletLength = 43;
+    var palletWidth = 43;
+
+    // --- 8. 레이어 계산 ---
+    var boxesPerRowWidth = Math.floor(palletWidth / boxWidth);           
+    var boxesPerRowLength = Math.floor((palletLength + 2) / boxLength); 
+    var boxesPerLayer = boxesPerRowWidth * boxesPerRowLength;
+    if (boxesPerLayer <= 0) return "적재 불가";
+
+    // --- 9. 기존 재고 기준 ---
+    var currentBoxes = Math.ceil(totalStock / boxQty);
+    var currentLayers = Math.ceil(currentBoxes / boxesPerLayer);
+    var usedHeight = currentLayers * boxHeight;
+
+    // --- 10. 추가 가능 레이어 ---
+    var remainHeight = palletHeight - usedHeight;
+    var addLayers = Math.floor(remainHeight / boxHeight);
+
+    if (addLayers <= 0) {
+      var remainQty = Math.max(dInboundQty, 0);
+      return "공간부족\n현재: " + currentBoxes + " box, " + remainQty + " ea";
+    }
+
+    // --- 11. 한 팔렛 1 라인 정책 ---
+    var maxAddBoxes = addLayers * boxesPerRowLength;
+    var moveBoxes = Math.min(maxAddBoxes, Math.ceil(dInboundQty / boxQty));
+    var moveQty = Math.min(moveBoxes * boxQty, dInboundQty);
+    var remainingQty = dInboundQty - moveQty;
+
+    // --- 결과 ---
+    return location + "\n이동 가능수량: " + moveQty + "ea (" + moveBoxes + ")" +
+           "\n남는 수량: " + remainingQty + "ea";
+
+  } catch (e) {
+    return "계산 오류: " + e.message;
+  }
+}
+
+
+function RECOMM_LOCATION_ORG(dInboundQty, mCurrLocs, nQty, boxQty, boxSize) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var location = "";
+  var totalStock = 0;
+  var useRecommended = false;
+
+  // --- 0. mCurrLocs 공백 체크 ---
+  if (!mCurrLocs || mCurrLocs.toString().trim() === "") return "";
+
+  // --- 0. 숫자 강제 변환 (NaN 방지) ---
+  dInboundQty = Number(dInboundQty);
+  nQty = Number(nQty);
+  boxQty = Number(boxQty);
+  if (isNaN(dInboundQty) || isNaN(nQty) || isNaN(boxQty)) return "숫자 데이터 오류";
+
+  // --- 1. 현재 로케이션 확인 ---
+  var lines = mCurrLocs.toString().split("\n").filter(l => l.trim() !== "");
+  if (lines.length > 0) {
+    var locs = [];
+    lines.forEach(l => {
+      var parts = l.split("/");
+      if (parts.length < 3) return;
+      var loc = parts[0].trim();
+      var qty = Number(parts[2].trim());
+      if (!isNaN(qty)) {
+        locs.push(loc);
+        totalStock += qty;
+      }
+    });
+    var uniqueLocs = [...new Set(locs)];
+    if (uniqueLocs.length === 1) location = uniqueLocs[0];
+    else return "";
+  } else useRecommended = true;
+
+  // --- 2. 사용가능 로케이션 시트 ---
+  var availSheet = ss.getSheetByName("사용가능 로케이션");
+  if (!availSheet) return "사용가능 로케이션 시트 없음";
+  var availData = availSheet.getRange("A2:B" + availSheet.getLastRow()).getValues();
+
+  // --- 3. 추천 로케이션 ---
+  if (useRecommended) {
+    if (!boxSize || boxSize.toString().trim() === "") return "";
+    var boxWidthTemp = Number(boxSize.toString().split("*")[0]);
+    var minDiff = Infinity;
+    availData.forEach(r => {
+      if (!r[0]) return;
+      var width = Number(r[1]);
+      if (isNaN(width)) return;
+      var diff = Math.abs(width - boxWidthTemp);
+      if (diff < minDiff) {
+        minDiff = diff;
+        location = r[0];
+      }
+    });
+  }
+
+  if (!boxSize || boxSize.toString().trim() === "") return location;
+
+  // --- 4. 박스 사이즈 ---
+  var boxDims = boxSize.toString().split("*").map(Number);
+  if (boxDims.length !== 3 || boxDims.some(isNaN)) return "박스 사이즈 오류";
+  var boxWidth = boxDims[0];
+  var boxLength = boxDims[1];
+  var boxHeight = boxDims[2];
+
+  // --- 5. 로케이션 높이 ---
+  var numSheet = ss.getSheetByName("Num-of-Items");
+  if (!numSheet) return "Num-of-Items 시트 없음";
+  var locsData = numSheet.getRange("B2:C" + numSheet.getLastRow()).getValues();
+  var locHeight = null;
+  for (var i = 0; i < locsData.length; i++) {
+    if (locsData[i][0] === location) {
+      locHeight = Number(locsData[i][1]);
+      break;
+    }
+  }
+  if (!locHeight || isNaN(locHeight)) return "로케이션 높이 없음";
+  var palletHeight = locHeight - 6;
+
+  // --- 6. width ---
+  var availWidth = null;
+  for (var i = 0; i < availData.length; i++) {
+    if (availData[i][0] === location) {
+      availWidth = Number(availData[i][1]);
+      break;
+    }
+  }
+  if (!availWidth || isNaN(availWidth)) availWidth = boxWidth;
+
+  // --- 7. pallet 고정 값 ---
+  var palletLength = 43; // 기본
+  var palletWidth = 43;  // 고정
+
+  // --- 8. 레이어 계산 ---
+  var boxesPerRowWidth = Math.floor(palletWidth / boxWidth);           // width는 넘어갈 수 없음
+  var boxesPerRowLength = Math.floor((palletLength + 2) / boxLength); // length는 2인치 오버 허용
+  var boxesPerLayer = boxesPerRowWidth * boxesPerRowLength;
+  if (boxesPerLayer <= 0) return "적재 불가";
+
+  // --- 9. 기존 재고 기준 ---
+  var currentBoxes = Math.ceil(totalStock / boxQty);
+  var currentLayers = Math.ceil(currentBoxes / boxesPerLayer);
+  var usedHeight = currentLayers * boxHeight;
+
+  // --- 10. 추가 가능 레이어 ---
+  var remainHeight = palletHeight - usedHeight;
+  var addLayers = Math.floor(remainHeight / boxHeight);
+
+  if (addLayers <= 0) {
+    var remainQty = Math.max(dInboundQty, 0);
+    return "공간부족\n현재: " + currentBoxes + " box, " + remainQty + " ea";
+  }
+
+  // --- 11. 한 팔렛 1 라인 정책 반영 ---
+  // 한 레이어에 한 제품만 사용 → 이동 가능 박스 = addLayers * boxesPerRowLength
+  var maxAddBoxes = addLayers * boxesPerRowLength;
+
+  // --- 12. 입고 수량 기준으로 이동 가능 박스 계산 ---
+  var moveBoxes = Math.min(maxAddBoxes, Math.ceil(dInboundQty / boxQty));
+  
+  // --- 13. 실제 이동 가능 수량이 입고 수량을 초과하면 조정 ---
+  var moveQty = Math.min(moveBoxes * boxQty, dInboundQty);
+
+  // --- 14. 남는 수량 계산 ---
+  var remainingQty = dInboundQty - moveQty;
+
+  // --- 15. 결과 ---
+  return location + "\n이동 가능수량: " + moveQty + "ea (" + moveBoxes + ")" +
+         "\n남는 수량: " + remainingQty + "ea";
+}
+
+
