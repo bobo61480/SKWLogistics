@@ -31,7 +31,7 @@ const localBindingConfig = {
         },
       ]
     : [],
-  images_transformations: { binding: "IMAGES" },
+  images: { binding: "IMAGES" },
 };
 
 export default defineConfig(async () => {
