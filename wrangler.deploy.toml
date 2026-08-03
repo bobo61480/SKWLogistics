@@ -9,3 +9,7 @@ binding = "ASSETS"
 
 [observability]
 enabled = true
+
+[[routes]]
+pattern = "stylekorean.dpdns.org"
+custom_domain = true
